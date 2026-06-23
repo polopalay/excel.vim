@@ -1,28 +1,34 @@
 # Vim Excel Viewer
 
-Open, edit and save `.xlsx` files directly inside Vim/Neovim.
+Edit Excel `.xlsx` files directly inside Vim or Neovim.
 
-Instead of launching Microsoft Excel, LibreOffice or WPS Office, this plugin converts Excel worksheets into an ASCII table that can be edited directly in Vim. Changes are written back to the original `.xlsx` file while preserving merged cells.
+Vim Excel Viewer converts Excel worksheets into editable ASCII tables, allowing you to view and modify spreadsheet data without leaving Vim. Changes are written back to the original workbook while preserving merged cells.
 
 ---
 
 ## Features
 
 * Open `.xlsx` files directly in Vim/Neovim
-* Edit cell contents using normal Vim motions
-* Save changes back to the original Excel workbook
-* Preserve merged cells
-* Insert rows above or below current row
-* Insert columns left or right of current column
-* Syntax highlighting for:
+* Edit worksheet data using normal Vim commands
+* Save changes back to the original Excel file
+* Preserve merged-cell layouts
+* Fast merge-cell detection using direct XML parsing
+* Multiple worksheet support
+* List workbook sheets from Vim
+* Open a specific worksheet without leaving Vim
+* Automatic reload after save
+* No Microsoft Excel, LibreOffice, or WPS Office required
 
-  * Numbers
-  * Dates
-  * URLs
-  * Uppercase headers
-  * Comments in parentheses
-* No external office suite required
-* Fast loading for large spreadsheets
+### Syntax Highlighting
+
+Built-in highlighting for:
+
+* Numbers
+* Dates
+* URLs
+* UPPERCASE headers
+* Text inside parentheses
+* Table borders
 
 ---
 
@@ -43,67 +49,13 @@ Check:
 python3 --version
 ```
 
-### Python Libraries
+### Python Packages
 
 Install:
 
 ```bash
 pip install openpyxl
 ```
-
-Required libraries:
-
-| Library               | Purpose                   |
-| --------------------- | ------------------------- |
-| openpyxl              | Read/write Excel files    |
-| zipfile               | Fast merge-cell detection |
-| xml.etree.ElementTree | Parse workbook metadata   |
-
----
-## Important: Disable ZIP Handling for XLSX
-
-Vim's built-in `zipPlugin` treats `.xlsx` files as ZIP archives because the XLSX format is internally a ZIP container.
-
-As a result, opening:
-
-```bash
-nvim report.xlsx
-```
-
-may open the workbook as a ZIP archive instead of using Vim Excel Viewer.
-
-### Recommended Fix
-
-Exclude `.xlsx` from the zip plugin extension list:
-
-```vim
-let g:zipPlugin_ext = '*.zip,*.jar,*.xpi,*.apk,*.war,*.ear'
-```
-
-### Alternative
-
-Disable the ZIP plugin completely:
-
-```vim
-let g:loaded_zip = 1
-let g:loaded_zipPlugin = 1
-```
-
-### Why?
-
-An `.xlsx` file is actually a ZIP archive containing XML files:
-
-```text
-report.xlsx
-├── xl/
-├── docProps/
-├── _rels/
-└── [Content_Types].xml
-```
-
-Without this configuration, Vim may intercept the file before Vim Excel Viewer has a chance to load it.
-
-If opening an XLSX file shows ZIP contents instead of a spreadsheet table, check your zipPlugin configuration first.
 
 ---
 
@@ -112,52 +64,50 @@ If opening an XLSX file shows ZIP contents instead of a spreadsheet table, check
 ### vim-plug
 
 ```vim
-Plug 'yourname/vim-excel-viewer'
+Plug 'polopalay/excel.vim'
 ```
 
-Then:
+Install:
 
 ```vim
 :PlugInstall
 ```
 
-### Lazy.nvim
+### lazy.nvim
 
 ```lua
 {
-    "yourname/vim-excel-viewer",
+    "polopalay/excel.vim",
 }
 ```
 
 ---
 
-## Usage
-
-Open any Excel file:
-
-```bash
-vim report.xlsx
-```
-
-or
+## Opening Excel Files
 
 ```bash
 nvim report.xlsx
 ```
 
-The spreadsheet will be displayed as an editable ASCII table:
+or
 
-```text
-+----------+------------+
-| Name     | Amount     |
-+----------+------------+
-| Alice    | 100        |
-+----------+------------+
-| Bob      | 250        |
-+----------+------------+
+```bash
+vim report.xlsx
 ```
 
-Edit cells normally.
+The worksheet is displayed as an editable ASCII table:
+
+```text
++----------+--------+
+| Name     | Amount |
++----------+--------+
+| Alice    | 100    |
++----------+--------+
+| Bob      | 250    |
++----------+--------+
+```
+
+Edit cells normally using Vim motions.
 
 Save:
 
@@ -165,19 +115,38 @@ Save:
 :w
 ```
 
-Changes are written directly to the original `.xlsx` file.
+The original workbook is updated automatically.
+
+---
+
+## Working With Sheets
+
+### List Available Sheets
+
+```vim
+:ExcelSheets
+```
+
+Example:
+
+```text
+Sheet1
+Customers
+Invoices
+Summary
+```
+
+### Open a Specific Sheet
+
+```vim
+:ExcelOpenSheet Customers
+```
+
+Switches the current buffer to the selected worksheet.
 
 ---
 
 ## Commands
-
-### Reload Workbook
-
-```vim
-:ExcelReload
-```
-
-Reload the workbook from disk.
 
 ### Save Workbook
 
@@ -185,124 +154,108 @@ Reload the workbook from disk.
 :ExcelSave
 ```
 
-Save and refresh formatting.
+Saves the current worksheet and refreshes formatting.
 
----
-
-## Row Operations
-
-### Insert Row Above
+### List Sheets
 
 ```vim
-:call ExcelInsertRowAbove()
+:ExcelSheets
 ```
 
-Insert a blank row above the current row.
+Displays all worksheet names in the workbook.
 
-### Insert Row Below
+### Open Sheet
 
 ```vim
-:call ExcelInsertRowBelow()
+:ExcelOpenSheet <sheet-name>
 ```
 
-Insert a blank row below the current row.
-
----
-
-## Column Operations
-
-### Insert Column Left
-
-```vim
-:call ExcelInsertColLeft()
-```
-
-Insert a blank column to the left.
-
-### Insert Column Right
-
-```vim
-:call ExcelInsertColRight()
-```
-
-Insert a blank column to the right.
-
----
-
-## Suggested Key Mappings
-
-Add these to your `vimrc` or `init.lua`.
-
-### Vimscript
-
-```vim
-autocmd FileType excel nnoremap <buffer> <leader>ra :call ExcelInsertRowAbove()<CR>
-autocmd FileType excel nnoremap <buffer> <leader>rb :call ExcelInsertRowBelow()<CR>
-
-autocmd FileType excel nnoremap <buffer> <leader>cl :call ExcelInsertColLeft()<CR>
-autocmd FileType excel nnoremap <buffer> <leader>cr :call ExcelInsertColRight()<CR>
-
-autocmd FileType excel nnoremap <buffer> <leader>er :ExcelReload<CR>
-autocmd FileType excel nnoremap <buffer> <leader>es :ExcelSave<CR>
-```
-
-### Default Mapping Table
-
-| Mapping      | Action              |
-| ------------ | ------------------- |
-| `<leader>ra` | Insert row above    |
-| `<leader>rb` | Insert row below    |
-| `<leader>cl` | Insert column left  |
-| `<leader>cr` | Insert column right |
-| `<leader>es` | Save workbook       |
-| `<leader>er` | Reload workbook     |
+Opens the specified worksheet.
 
 ---
 
 ## Supported Features
 
-| Feature                   | Status                |
-| ------------------------- | --------------------- |
-| Read XLSX                 | V                     |
-| Write XLSX                | V                     |
-| Merged Cells              | V                     |
-| Insert Rows               | V                     |
-| Insert Columns            | V                     |
-| Large Files               | V                     |
-| Formulas (display result) | V                     |
-| Preserve Formatting       | Partial               |
-| Multiple Sheets           | X (active sheet only) |
-| XLS                       | X                     |
-| CSV                       | X                     |
+| Feature              | Status |
+| -------------------- | ------ |
+| Read XLSX            | ✓      |
+| Write XLSX           | ✓      |
+| Merged Cells         | ✓      |
+| Multiple Sheets      | ✓      |
+| Formula Results      | ✓      |
+| Large Files          | ✓      |
+| Fast Merge Detection | ✓      |
+| XLS Format           | ✗      |
+| CSV Mode             | ✗      |
+| Charts Editing       | ✗      |
+| Image Editing        | ✗      |
 
 ---
 
 ## How It Works
 
-1. `.xlsx` file is opened.
-2. Python reads workbook using `openpyxl`.
-3. Worksheet is converted to an ASCII table.
-4. User edits text inside Vim.
-5. On save:
+1. User opens an `.xlsx` file.
+2. Python loads workbook data using OpenPyXL.
+3. Merge information is extracted.
+4. Worksheet is rendered as an ASCII table.
+5. User edits data directly inside Vim.
+6. On save:
 
    * ASCII table is parsed back into rows and columns.
-   * Workbook is updated.
+   * Workbook data is updated.
    * Merge regions are restored.
-6. Original `.xlsx` file is overwritten.
+7. Workbook is written back to disk.
+
+---
+
+## ZIP Plugin Compatibility
+
+Excel files are ZIP containers internally.
+
+Many Vim installations load the built-in `zip.vim` plugin, which may try to open `.xlsx` files as archives.
+
+Vim Excel Viewer automatically removes ZIP handlers registered for `.xlsx` files and takes ownership of opening and saving Excel workbooks.
+
+No additional configuration is normally required.
+
+---
+
+## Limitations
+
+* Only `.xlsx` files are supported
+* Formulas are displayed as calculated values
+* Charts are not editable
+* Embedded images are ignored
+* Complex Excel formatting is not rendered
+* Cell styles are not preserved when editing data
 
 ---
 
 ## Example Workflow
 
+Open workbook:
+
 ```bash
 nvim invoices.xlsx
 ```
 
-Edit:
+List sheets:
+
+```vim
+:ExcelSheets
+```
+
+Open worksheet:
+
+```vim
+:ExcelOpenSheet Invoices
+```
+
+Edit values:
 
 ```text
-| Invoice | Amount |
-| INV001  | 1000   |
+| INV001 | 1000 |
+| INV002 | 2500 |
 ```
 
 Save:
@@ -315,19 +268,9 @@ Workbook is updated immediately.
 
 ---
 
-## Limitations
-
-* Only the active worksheet is supported.
-* Excel formulas are saved as displayed values.
-* Charts are not editable.
-* Images are ignored.
-* Complex formatting is not rendered in Vim.
-
----
-
 ## License
 
-MIT License
+MIT
 
 ---
 
@@ -339,4 +282,3 @@ Built with:
 * Neovim
 * Python
 * OpenPyXL
-
