@@ -23,7 +23,6 @@ venv/
 output/
 tmp/
 
-# ignore toàn bộ target
-target/*
-# ignore Cargo.lock
-Cargo.lock
+# Rust
+**/target/
+**/Cargo.lock
