@@ -2,7 +2,7 @@
 
 Edit Excel `.xlsx` files directly inside Vim or Neovim.
 
-Vim Excel Viewer converts Excel worksheets into editable ASCII tables, allowing you to view and modify spreadsheet data without leaving Vim. Changes are written back to the original workbook while preserving merged cells.
+Vim Excel Viewer renders Excel worksheets as editable ASCII tables and writes changes back to the original workbook. The plugin is powered by a Rust backend and does not require Microsoft Excel, LibreOffice, WPS Office, Python, or OpenPyXL.
 
 ---
 
@@ -10,25 +10,15 @@ Vim Excel Viewer converts Excel worksheets into editable ASCII tables, allowing 
 
 * Open `.xlsx` files directly in Vim/Neovim
 * Edit worksheet data using normal Vim commands
-* Save changes back to the original Excel file
-* Preserve merged-cell layouts
-* Fast merge-cell detection using direct XML parsing
+* Save changes back to Excel workbooks
+* Preserve merged cells
 * Multiple worksheet support
-* List workbook sheets from Vim
-* Open a specific worksheet without leaving Vim
-* Automatic reload after save
-* No Microsoft Excel, LibreOffice, or WPS Office required
-
-### Syntax Highlighting
-
-Built-in highlighting for:
-
-* Numbers
-* Dates
-* URLs
-* UPPERCASE headers
-* Text inside parentheses
-* Table borders
+* Add, rename, delete, and switch worksheets
+* Automatic workbook reload after save
+* Built-in syntax highlighting
+* Pure Rust backend
+* Automatic first-time build using Cargo
+* No external office suite required
 
 ---
 
@@ -39,22 +29,20 @@ Built-in highlighting for:
 * Vim 8.2+
 * Neovim 0.7+
 
-### Python
+### Rust
 
-Python 3 is required.
+Rust and Cargo are required for the initial build.
 
 Check:
 
 ```bash
-python3 --version
+cargo --version
 ```
 
-### Python Packages
-
-Install:
+Install Rust:
 
 ```bash
-pip install openpyxl
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
 ---
@@ -83,6 +71,30 @@ Install:
 
 ---
 
+## First Build
+
+The plugin automatically builds the Rust backend on first use.
+
+You can also build manually:
+
+```vim
+:ExcelBuild
+```
+
+The binary is generated under:
+
+```text
+rs/target/release/excel
+```
+
+or on Windows:
+
+```text
+rs/target/release/excel.exe
+```
+
+---
+
 ## Opening Excel Files
 
 ```bash
@@ -95,7 +107,7 @@ or
 vim report.xlsx
 ```
 
-The worksheet is displayed as an editable ASCII table:
+Example rendering:
 
 ```text
 +----------+--------+
@@ -107,7 +119,7 @@ The worksheet is displayed as an editable ASCII table:
 +----------+--------+
 ```
 
-Edit cells normally using Vim motions.
+Edit normally using Vim motions.
 
 Save:
 
@@ -115,96 +127,94 @@ Save:
 :w
 ```
 
-The original workbook is updated automatically.
-
----
-
-## Working With Sheets
-
-### List Available Sheets
-
-```vim
-:ExcelSheets
-```
-
-Example:
-
-```text
-Sheet1
-Customers
-Invoices
-Summary
-```
-
-### Open a Specific Sheet
-
-```vim
-:ExcelOpenSheet Customers
-```
-
-Switches the current buffer to the selected worksheet.
-
----
-
-## Commands
-
-### Save Workbook
+or
 
 ```vim
 :ExcelSave
 ```
 
-Saves the current worksheet and refreshes formatting.
+---
 
-### List Sheets
+## Worksheet Commands
+
+### List Worksheets
 
 ```vim
 :ExcelSheets
 ```
 
-Displays all worksheet names in the workbook.
-
-### Open Sheet
+### Open Worksheet
 
 ```vim
-:ExcelOpenSheet <sheet-name>
+:ExcelSheetOpen Sheet1
 ```
 
-Opens the specified worksheet.
+### Create Worksheet
+
+```vim
+:ExcelSheetAdd NewSheet
+```
+
+### Rename Worksheet
+
+```vim
+:ExcelSheetRename
+```
+
+Interactive menu selection is displayed.
+
+### Delete Worksheet
+
+```vim
+:ExcelSheetDelete Sheet1
+```
+
+Confirmation is required before deletion.
+
+---
+
+## Commands
+
+| Command             | Description        |
+| ------------------- | ------------------ |
+| `:ExcelBuild`       | Build Rust backend |
+| `:ExcelSave`        | Save workbook      |
+| `:ExcelSheets`      | List worksheets    |
+| `:ExcelSheetOpen`   | Open worksheet     |
+| `:ExcelSheetAdd`    | Create worksheet   |
+| `:ExcelSheetRename` | Rename worksheet   |
+| `:ExcelSheetDelete` | Delete worksheet   |
+
+---
+
+## Syntax Highlighting
+
+Built-in highlighting for:
+
+* Numbers
+* Dates
+* URLs
+* UPPERCASE headers
+* Text inside parentheses
+* Table borders
 
 ---
 
 ## Supported Features
 
-| Feature              | Status |
-| -------------------- | ------ |
-| Read XLSX            | ✓      |
-| Write XLSX           | ✓      |
-| Merged Cells         | ✓      |
-| Multiple Sheets      | ✓      |
-| Formula Results      | ✓      |
-| Large Files          | ✓      |
-| Fast Merge Detection | ✓      |
-| XLS Format           | ✗      |
-| CSV Mode             | ✗      |
-| Charts Editing       | ✗      |
-| Image Editing        | ✗      |
-
----
-
-## How It Works
-
-1. User opens an `.xlsx` file.
-2. Python loads workbook data using OpenPyXL.
-3. Merge information is extracted.
-4. Worksheet is rendered as an ASCII table.
-5. User edits data directly inside Vim.
-6. On save:
-
-   * ASCII table is parsed back into rows and columns.
-   * Workbook data is updated.
-   * Merge regions are restored.
-7. Workbook is written back to disk.
+| Feature         | Status |
+| --------------- | ------ |
+| Read XLSX       | ✓      |
+| Write XLSX      | ✓      |
+| Merged Cells    | ✓      |
+| Multiple Sheets | ✓      |
+| Add Sheet       | ✓      |
+| Rename Sheet    | ✓      |
+| Delete Sheet    | ✓      |
+| Formula Results | ✓      |
+| XLS Format      | ✗      |
+| Charts Editing  | ✗      |
+| Image Editing   | ✗      |
 
 ---
 
@@ -212,11 +222,9 @@ Opens the specified worksheet.
 
 Excel files are ZIP containers internally.
 
-Many Vim installations load the built-in `zip.vim` plugin, which may try to open `.xlsx` files as archives.
+The plugin automatically overrides Vim's built-in `zip.vim` handlers for `.xlsx` files and takes ownership of workbook loading and saving.
 
-Vim Excel Viewer automatically removes ZIP handlers registered for `.xlsx` files and takes ownership of opening and saving Excel workbooks.
-
-No additional configuration is normally required.
+No additional configuration is required.
 
 ---
 
@@ -227,44 +235,7 @@ No additional configuration is normally required.
 * Charts are not editable
 * Embedded images are ignored
 * Complex Excel formatting is not rendered
-* Cell styles are not preserved when editing data
-
----
-
-## Example Workflow
-
-Open workbook:
-
-```bash
-nvim invoices.xlsx
-```
-
-List sheets:
-
-```vim
-:ExcelSheets
-```
-
-Open worksheet:
-
-```vim
-:ExcelOpenSheet Invoices
-```
-
-Edit values:
-
-```text
-| INV001 | 1000 |
-| INV002 | 2500 |
-```
-
-Save:
-
-```vim
-:w
-```
-
-Workbook is updated immediately.
+* Cell styles are not preserved
 
 ---
 
@@ -280,5 +251,6 @@ Built with:
 
 * Vim
 * Neovim
-* Python
-* OpenPyXL
+* Rust
+* ZIP
+* quick-xml

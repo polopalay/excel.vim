@@ -22,3 +22,8 @@ venv/
 # Generated output
 output/
 tmp/
+
+# ignore toàn bộ target
+target/*
+# ignore Cargo.lock
+Cargo.lock
