@@ -1,24 +1,57 @@
 # Vim Excel Viewer
 
-Edit Excel `.xlsx` files directly inside Vim or Neovim.
+Edit Microsoft Excel `.xlsx` workbooks directly inside Vim or Neovim.
 
-Vim Excel Viewer renders Excel worksheets as editable ASCII tables and writes changes back to the original workbook. The plugin is powered by a Rust backend and does not require Microsoft Excel, LibreOffice, WPS Office, Python, or OpenPyXL.
+Vim Excel Viewer renders Excel worksheets as editable ASCII tables while preserving workbook structure and common cell formatting. Changes are written back to the original workbook using a fast Rust backend.
+
+No Microsoft Excel, LibreOffice, WPS Office, Python, or OpenPyXL is required.
 
 ---
 
 ## Features
 
-* Open `.xlsx` files directly in Vim/Neovim
-* Edit worksheet data using normal Vim commands
-* Save changes back to Excel workbooks
-* Preserve merged cells
-* Multiple worksheet support
-* Add, rename, delete, and switch worksheets
-* Automatic workbook reload after save
-* Built-in syntax highlighting
-* Pure Rust backend
-* Automatic first-time build using Cargo
-* No external office suite required
+### Workbook
+
+- Open `.xlsx` files directly in Vim or Neovim
+- Save changes back to the original workbook
+- Multiple worksheet support
+- Add worksheets
+- Rename worksheets
+- Delete worksheets
+- Switch between worksheets
+- Automatic reload after saving
+- Automatic first-time Rust build
+- Pure Rust backend
+
+### Cell Editing
+
+- Edit cells using normal Vim commands
+- Jump directly to any cell (`A1`, `B25`, ...)
+- Statusline displays the current worksheet and active cell
+- Supports Normal mode and Visual mode operations
+
+### Formatting
+
+- Preserve existing formatting
+- Preserve merged cells
+- Merge cells
+- Unmerge cells
+- Toggle **Bold**
+- Toggle *Italic*
+- Change font color
+- Change background color
+- Supports named colors and custom `#RRGGBB` colors
+
+### Rendering
+
+- Automatic column sizing
+- Formula results are displayed
+- Built-in syntax highlighting
+- URLs
+- Numbers
+- Dates
+- Table borders
+- Real Excel formatting (bold, italic, foreground color, background color)
 
 ---
 
@@ -26,14 +59,14 @@ Vim Excel Viewer renders Excel worksheets as editable ASCII tables and writes ch
 
 ### Vim / Neovim
 
-* Vim 8.2+
-* Neovim 0.7+
+- Vim 8.2+
+- Neovim 0.7+
 
 ### Rust
 
-Rust and Cargo are required for the initial build.
+Rust and Cargo are required only for the initial build.
 
-Check:
+Verify installation:
 
 ```bash
 cargo --version
@@ -55,7 +88,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 Plug 'polopalay/excel.vim'
 ```
 
-Install:
+Then:
 
 ```vim
 :PlugInstall
@@ -73,21 +106,23 @@ Install:
 
 ## First Build
 
-The plugin automatically builds the Rust backend on first use.
+The Rust backend is built automatically the first time an Excel file is opened.
 
-You can also build manually:
+To build manually:
 
 ```vim
 :ExcelBuild
 ```
 
-The binary is generated under:
+Generated binary:
+
+Linux / macOS
 
 ```text
 rs/target/release/excel
 ```
 
-or on Windows:
+Windows
 
 ```text
 rs/target/release/excel.exe
@@ -95,19 +130,19 @@ rs/target/release/excel.exe
 
 ---
 
-## Opening Excel Files
-
-```bash
-nvim report.xlsx
-```
-
-or
+## Opening Workbooks
 
 ```bash
 vim report.xlsx
 ```
 
-Example rendering:
+or
+
+```bash
+nvim report.xlsx
+```
+
+Example:
 
 ```text
 +----------+--------+
@@ -119,9 +154,7 @@ Example rendering:
 +----------+--------+
 ```
 
-Edit normally using Vim motions.
-
-Save:
+Save normally:
 
 ```vim
 :w
@@ -135,122 +168,239 @@ or
 
 ---
 
-## Worksheet Commands
+# Worksheet Commands
 
-### List Worksheets
+| Command | Description |
+|----------|-------------|
+| `:ExcelSheets` | List worksheets |
+| `:ExcelSheetOpen Sheet1` | Open worksheet |
+| `:ExcelSheetAdd NewSheet` | Create worksheet |
+| `:ExcelSheetRename` | Rename worksheet |
+| `:ExcelSheetDelete Sheet1` | Delete worksheet |
+
+---
+
+# Cell Navigation
+
+Jump directly to a cell.
 
 ```vim
-:ExcelSheets
+:ExcelGoto C15
 ```
 
-### Open Worksheet
+Tab completion is supported.
+
+The current worksheet and active cell are displayed automatically in the Vim statusline.
+
+Example:
+
+```text
+Sheet1 / C15
+```
+
+---
+
+# Formatting Commands
+
+## Font Color
 
 ```vim
-:ExcelSheetOpen Sheet1
+:ExcelSetFg red
 ```
 
-### Create Worksheet
+Visual mode:
 
 ```vim
-:ExcelSheetAdd NewSheet
+:'<,'>ExcelSetFg blue
 ```
 
-### Rename Worksheet
+## Background Color
 
 ```vim
-:ExcelSheetRename
+:ExcelSetBg yellow
 ```
 
-Interactive menu selection is displayed.
-
-### Delete Worksheet
+Visual mode:
 
 ```vim
-:ExcelSheetDelete Sheet1
+:'<,'>ExcelSetBg "#FFE599"
 ```
 
-Confirmation is required before deletion.
+## Bold
+
+```vim
+:ExcelBold
+```
+
+Visual selection:
+
+```vim
+:'<,'>ExcelBold
+```
+
+## Italic
+
+```vim
+:ExcelItalic
+```
+
+Visual selection:
+
+```vim
+:'<,'>ExcelItalic
+```
 
 ---
 
-## Commands
+# Merge Cells
 
-| Command             | Description        |
-| ------------------- | ------------------ |
-| `:ExcelBuild`       | Build Rust backend |
-| `:ExcelSave`        | Save workbook      |
-| `:ExcelSheets`      | List worksheets    |
-| `:ExcelSheetOpen`   | Open worksheet     |
-| `:ExcelSheetAdd`    | Create worksheet   |
-| `:ExcelSheetRename` | Rename worksheet   |
-| `:ExcelSheetDelete` | Delete worksheet   |
+Merge selected cells:
 
----
+```vim
+:'<,'>ExcelMerge
+```
 
-## Syntax Highlighting
+Unmerge:
 
-Built-in highlighting for:
+```vim
+:ExcelUnmerge
+```
 
-* Numbers
-* Dates
-* URLs
-* UPPERCASE headers
-* Text inside parentheses
-* Table borders
+or
+
+```vim
+:'<,'>ExcelUnmerge
+```
 
 ---
 
-## Supported Features
+# Supported Colors
 
-| Feature         | Status |
-| --------------- | ------ |
-| Read XLSX       | ✓      |
-| Write XLSX      | ✓      |
-| Merged Cells    | ✓      |
-| Multiple Sheets | ✓      |
-| Add Sheet       | ✓      |
-| Rename Sheet    | ✓      |
-| Delete Sheet    | ✓      |
-| Formula Results | ✓      |
-| XLS Format      | ✗      |
-| Charts Editing  | ✗      |
-| Image Editing   | ✗      |
+Named colors:
 
----
+```
+red
+green
+blue
+yellow
+orange
+purple
+gray
+white
+black
+none
+```
 
-## ZIP Plugin Compatibility
+Custom colors:
 
-Excel files are ZIP containers internally.
+```
+#RRGGBB
+```
 
-The plugin automatically overrides Vim's built-in `zip.vim` handlers for `.xlsx` files and takes ownership of workbook loading and saving.
+Example:
 
-No additional configuration is required.
-
----
-
-## Limitations
-
-* Only `.xlsx` files are supported
-* Formulas are displayed as calculated values
-* Charts are not editable
-* Embedded images are ignored
-* Complex Excel formatting is not rendered
-* Cell styles are not preserved
+```vim
+:ExcelSetBg "#D9EAD3"
+```
 
 ---
 
-## License
+# Commands
+
+| Command | Description |
+|----------|-------------|
+| `:ExcelBuild` | Build Rust backend |
+| `:ExcelSave` | Save workbook |
+| `:ExcelSheets` | List worksheets |
+| `:ExcelSheetOpen` | Open worksheet |
+| `:ExcelSheetAdd` | Add worksheet |
+| `:ExcelSheetRename` | Rename worksheet |
+| `:ExcelSheetDelete` | Delete worksheet |
+| `:ExcelGoto` | Jump to a cell |
+| `:ExcelSetFg` | Change font color |
+| `:ExcelSetBg` | Change background color |
+| `:ExcelBold` | Toggle bold |
+| `:ExcelItalic` | Toggle italic |
+| `:ExcelMerge` | Merge cells |
+| `:ExcelUnmerge` | Unmerge cells |
+
+---
+
+# Syntax Highlighting
+
+Built-in highlighting includes:
+
+- Numbers
+- Dates
+- URLs
+- Table borders
+- Existing Excel bold text
+- Existing Excel italic text
+- Existing Excel font colors
+- Existing Excel background colors
+
+---
+
+# Supported Features
+
+| Feature | Status |
+|----------|--------|
+| Read XLSX | ✓ |
+| Write XLSX | ✓ |
+| Multiple Worksheets | ✓ |
+| Add Worksheet | ✓ |
+| Rename Worksheet | ✓ |
+| Delete Worksheet | ✓ |
+| Merge Cells | ✓ |
+| Unmerge Cells | ✓ |
+| Preserve Merged Cells | ✓ |
+| Bold | ✓ |
+| Italic | ✓ |
+| Font Color | ✓ |
+| Background Color | ✓ |
+| Formula Results | ✓ |
+| Cell Navigation | ✓ |
+| Statusline Cell Indicator | ✓ |
+| XLS Format | ✗ |
+| Charts Editing | ✗ |
+| Embedded Images | ✗ |
+| Pivot Tables | ✗ |
+| VBA Macros | ✗ |
+
+---
+
+# ZIP Plugin Compatibility
+
+Excel workbooks are ZIP containers internally.
+
+The plugin automatically overrides Vim's built-in `zip.vim` handlers for `.xlsx` files, so no additional configuration is required.
+
+---
+
+# Limitations
+
+- Only `.xlsx` files are supported
+- Formulas are shown as cached results
+- Charts are not editable
+- Embedded images are ignored
+- Pivot tables are not editable
+- VBA macros are preserved but cannot be edited
+- Extremely complex Excel layouts may not render identically to Microsoft Excel
+
+---
+
+# License
 
 MIT
 
 ---
 
-## Credits
+# Credits
 
-Built with:
+Built with
 
-* Vim
-* Neovim
-* Rust
-* ZIP
-* quick-xml
+- Rust
+- Vim
+- Neovim
+- ZIP
+- quick-xml
