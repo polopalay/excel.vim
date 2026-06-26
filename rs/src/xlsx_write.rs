@@ -20,7 +20,7 @@ use zip::{ZipArchive, ZipWriter};
 
 use crate::coord::col_row_to_ref;
 use crate::error::AppResult;
-use crate::model::SheetData;
+use crate::model::{CellStyle, SheetData};
 
 /// Escape ký tự đặc biệt XML trong text node. quick-xml's BytesText::new
 /// không tự escape, nên ta escape thủ công trước khi đưa vào BytesText.
@@ -43,10 +43,10 @@ fn xml_escape_text(s: &str) -> String {
 /// tối giản nhưng hợp lệ: <worksheet><sheetData><row><c>...</c></row></sheetData>
 /// <mergeCells>...</mergeCells></worksheet>
 ///
-/// Đây KHÔNG cố giữ style/format gốc của từng cell (đó nằm trong styles.xml
-/// qua attribute s="..." trên <c>, mà ta không parse ở bước đọc). Việc này
-/// khớp với hành vi excel.py gốc: hiển thị/sửa dạng bảng ASCII thuần text,
-/// không can thiệp định dạng ô.
+/// Style của từng cell ĐƯỢC giữ lại qua attribute `s="N"` (lấy từ
+/// `sheet.cell_style_id`), N là index vào `<cellXfs>` của xl/styles.xml.
+/// Việc đảm bảo styles.xml có đủ entry tại index N là trách nhiệm của
+/// `sync_styles_xml()` (gọi riêng, trước khi ghi sheet XML vào zip).
 pub fn render_sheet_xml(sheet: &SheetData) -> AppResult<Vec<u8>> {
     let mut buf = Vec::new();
     {
@@ -86,14 +86,28 @@ pub fn render_sheet_xml(sheet: &SheetData) -> AppResult<Vec<u8>> {
 
             for col in 1..=max_col {
                 let cell_ref = col_row_to_ref(col, row);
+                let style_id = sheet.cell_style_id.get(&(row, col)).copied();
                 match sheet.get(row, col) {
                     None => {
-                        // Cell rỗng: bỏ qua hoàn toàn (Excel coi cell không
-                        // xuất hiện trong XML là rỗng) -> giữ file nhỏ gọn.
+                        // Cell rỗng nhưng có style riêng (ví dụ chỉ tô màu nền,
+                        // chưa nhập text) -> vẫn cần ghi <c> để giữ style.
+                        if let Some(sid) = style_id {
+                            if sid != 0 {
+                                let mut c_tag = BytesStart::new("c");
+                                c_tag.push_attribute(("r", cell_ref.as_str()));
+                                let sid_str = sid.to_string();
+                                c_tag.push_attribute(("s", sid_str.as_str()));
+                                w.write_event(Event::Empty(c_tag))?;
+                            }
+                        }
                     }
                     Some(value) => {
                         let mut c_tag = BytesStart::new("c");
                         c_tag.push_attribute(("r", cell_ref.as_str()));
+                        let sid_str = style_id.unwrap_or(0).to_string();
+                        if style_id.unwrap_or(0) != 0 {
+                            c_tag.push_attribute(("s", sid_str.as_str()));
+                        }
                         c_tag.push_attribute(("t", "inlineStr"));
                         w.write_event(Event::Start(c_tag))?;
 
@@ -148,12 +162,11 @@ pub fn render_sheet_xml(sheet: &SheetData) -> AppResult<Vec<u8>> {
 }
 
 /// Ghi lại toàn bộ file .xlsx vào bộ nhớ: copy mọi entry gốc, chỉ thay thế
-/// nội dung của `target_sheet_path` bằng `new_sheet_xml`. Trả về bytes hoàn
-/// chỉnh của file .xlsx mới — caller chịu trách nhiệm ghi ra đĩa (atomic).
-pub fn write_xlsx_replacing_sheet<R: Read + Seek>(
+/// nội dung của các entry có trong `replacements`. Trả về bytes hoàn chỉnh
+/// của file .xlsx mới — caller chịu trách nhiệm ghi ra đĩa (atomic).
+pub fn write_xlsx_replacing_entries<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
-    target_sheet_path: &str,
-    new_sheet_xml: &[u8],
+    replacements: &[(&str, Vec<u8>)],
 ) -> AppResult<Vec<u8>> {
     let mut out_buf = Vec::new();
     {
@@ -162,13 +175,16 @@ pub fn write_xlsx_replacing_sheet<R: Read + Seek>(
         let options = FileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
 
+        let mut written: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i)?;
             let name = entry.name().to_string();
 
             zw.start_file(&name, options)?;
-            if name == target_sheet_path {
-                zw.write_all(new_sheet_xml)?;
+            if let Some((path, bytes)) = replacements.iter().find(|(p, _)| **p == name) {
+                zw.write_all(bytes)?;
+                written.insert(path);
             } else {
                 let mut buf = Vec::with_capacity(entry.size() as usize);
                 entry.read_to_end(&mut buf)?;
@@ -176,10 +192,224 @@ pub fn write_xlsx_replacing_sheet<R: Read + Seek>(
             }
         }
 
+        // Nếu 1 path trong replacements không tồn tại sẵn trong zip gốc
+        // (ví dụ file không có sharedStrings.xml/styles.xml) -> thêm mới.
+        for (path, bytes) in replacements {
+            if !written.contains(*path) {
+                zw.start_file(*path, options)?;
+                zw.write_all(bytes)?;
+            }
+        }
+
         zw.finish()?;
     }
     Ok(out_buf)
 }
+
+/// Đồng bộ lại xl/styles.xml gốc để chứa đủ font/fill/cellXfs cho TOÀN BỘ
+/// style trong `sheet.styles` (bao gồm style mới do user thêm qua lệnh
+/// setbg, vốn không tồn tại trong file gốc). Style cũ (index < số cellXfs
+/// gốc) được giữ NGUYÊN VẸN bytes-for-bytes — chỉ append thêm phần tử mới
+/// vào cuối <fonts>/<fills>/<cellXfs>, nên không ảnh hưởng cell nào khác.
+///
+/// Trả về `None` nếu không có style mới nào cần thêm (tức styles.xml gốc đã
+/// đủ dùng) — caller có thể bỏ qua, không cần ghi lại styles.xml.
+pub fn sync_styles_xml(
+    original_styles_xml: Option<&[u8]>,
+    all_styles: &[CellStyle],
+) -> AppResult<Option<Vec<u8>>> {
+    // Số cellXfs gốc đã tồn tại trong file (= độ dài Vec<CellStyle> mà
+    // read_styles() trả về khi đọc lần đầu). Nếu all_styles không có gì
+    // mới hơn con số đó thì không cần sửa styles.xml.
+    let existing_xml = match original_styles_xml {
+        Some(b) => b.to_vec(),
+        None => default_styles_xml(),
+    };
+
+    let existing_count = count_cell_xfs(&existing_xml)?;
+    if all_styles.len() <= existing_count {
+        return Ok(None);
+    }
+
+    let new_styles = &all_styles[existing_count..];
+
+    let mut reader = quick_xml::reader::Reader::from_reader(existing_xml.as_slice());
+    reader.trim_text(false);
+    let mut writer = Writer::new(Vec::new());
+    let mut buf = Vec::new();
+
+    // Đếm sẵn số font/fill hiện có để biết fontId/fillId mới sẽ bắt đầu từ đâu.
+    let existing_font_count = count_tag(&existing_xml, b"fonts", b"font")?;
+    let existing_fill_count = count_tag(&existing_xml, b"fills", b"fill")?;
+
+    let mut next_font_id = existing_font_count as u32;
+    let mut next_fill_id = existing_fill_count as u32;
+    // (font_id, fill_id) cho mỗi style mới, theo đúng thứ tự sẽ append vào cellXfs.
+    let mut new_xf_ids: Vec<(u32, u32)> = Vec::with_capacity(new_styles.len());
+    let mut new_font_tags: Vec<String> = Vec::new();
+    let mut new_fill_tags: Vec<String> = Vec::new();
+
+    for style in new_styles {
+        let needs_font = style.bold || style.italic || style.font_color.is_some();
+        let font_id = if needs_font {
+            let tag = format!(
+                "<font>{}{}{}</font>",
+                if style.bold { "<b/>" } else { "" },
+                if style.italic { "<i/>" } else { "" },
+                style
+                    .font_color
+                    .map(|c| format!("<color rgb=\"FF{}\"/>", c.to_hex()))
+                    .unwrap_or_default(),
+            );
+            new_font_tags.push(tag);
+            let id = next_font_id;
+            next_font_id += 1;
+            id
+        } else {
+            0 // font mặc định (id 0 luôn tồn tại theo chuẩn OOXML)
+        };
+
+        let fill_id = if let Some(bg) = style.bg_color {
+            let tag = format!(
+                "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FF{hex}\"/><bgColor rgb=\"FF{hex}\"/></patternFill></fill>",
+                hex = bg.to_hex()
+            );
+            new_fill_tags.push(tag);
+            let id = next_fill_id;
+            next_fill_id += 1;
+            id
+        } else {
+            0 // "no fill" (id 0 theo chuẩn OOXML mặc định)
+        };
+
+        new_xf_ids.push((font_id, fill_id));
+    }
+
+    loop {
+        match reader.read_event_into(&mut buf)? {
+            Event::Eof => break,
+            Event::End(e) if e.local_name().as_ref() == b"fonts" => {
+                for tag in &new_font_tags {
+                    writer.get_mut().extend_from_slice(tag.as_bytes());
+                }
+                writer.write_event(Event::End(e))?;
+            }
+            Event::End(e) if e.local_name().as_ref() == b"fills" => {
+                for tag in &new_fill_tags {
+                    writer.get_mut().extend_from_slice(tag.as_bytes());
+                }
+                writer.write_event(Event::End(e))?;
+            }
+            Event::End(e) if e.local_name().as_ref() == b"cellXfs" => {
+                for (font_id, fill_id) in &new_xf_ids {
+                    let tag = format!(
+                        "<xf numFmtId=\"0\" fontId=\"{font_id}\" fillId=\"{fill_id}\" borderId=\"0\" xfId=\"0\"/>"
+                    );
+                    writer.get_mut().extend_from_slice(tag.as_bytes());
+                }
+                writer.write_event(Event::End(e))?;
+            }
+            // Cập nhật lại count="N" trên <fonts>, <fills>, <cellXfs> để khớp
+            // số lượng thực tế sau khi append (Excel không bắt buộc nhưng
+            // 1 số phiên bản LibreOffice kiểm tra, nên cập nhật cho chuẩn).
+            Event::Start(e) if e.local_name().as_ref() == b"fonts" => {
+                writer.write_event(Event::Start(rewrite_count(&e, existing_font_count + new_font_tags.len())?))?;
+            }
+            Event::Start(e) if e.local_name().as_ref() == b"fills" => {
+                writer.write_event(Event::Start(rewrite_count(&e, existing_fill_count + new_fill_tags.len())?))?;
+            }
+            Event::Start(e) if e.local_name().as_ref() == b"cellXfs" => {
+                writer.write_event(Event::Start(rewrite_count(&e, existing_count + new_xf_ids.len())?))?;
+            }
+            other => {
+                writer.write_event(other)?;
+            }
+        }
+        buf.clear();
+    }
+
+    Ok(Some(writer.into_inner()))
+}
+
+/// Đếm số tag con trực tiếp (ví dụ <font> trong <fonts>) để biết id tiếp
+/// theo sẽ append vào đâu.
+fn count_tag(xml: &[u8], parent_local: &[u8], child_local: &[u8]) -> AppResult<usize> {
+    let mut reader = quick_xml::reader::Reader::from_reader(xml);
+    reader.trim_text(true);
+    let mut buf = Vec::new();
+    let mut in_parent = false;
+    let mut depth = 0i32;
+    let mut count = 0usize;
+    loop {
+        match reader.read_event_into(&mut buf)? {
+            Event::Start(e) if e.local_name().as_ref() == parent_local => {
+                in_parent = true;
+                depth = 0;
+            }
+            Event::End(e) if e.local_name().as_ref() == parent_local => {
+                in_parent = false;
+            }
+            Event::Start(e) if in_parent && e.local_name().as_ref() == child_local && depth == 0 => {
+                count += 1;
+                depth += 1;
+            }
+            Event::Start(_) if in_parent => depth += 1,
+            Event::End(_) if in_parent && depth > 0 => depth -= 1,
+            Event::Empty(e) if in_parent && e.local_name().as_ref() == child_local && depth == 0 => {
+                count += 1;
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(count)
+}
+
+fn count_cell_xfs(xml: &[u8]) -> AppResult<usize> {
+    count_tag(xml, b"cellXfs", b"xf")
+}
+
+/// Tạo lại 1 BytesStart với attribute count="N" được ghi đè (hoặc thêm mới
+/// nếu chưa có), giữ nguyên mọi attribute khác.
+fn rewrite_count<'a>(e: &BytesStart<'a>, new_count: usize) -> AppResult<BytesStart<'static>> {
+    let mut new_tag = BytesStart::new(String::from_utf8(e.name().as_ref().to_vec())?);
+    let mut had_count = false;
+    for attr in e.attributes() {
+        let attr = attr?;
+        if attr.key.as_ref() == b"count" {
+            let count_str = new_count.to_string();
+            new_tag.push_attribute(("count", count_str.as_str()));
+            had_count = true;
+        } else {
+            let key = String::from_utf8(attr.key.as_ref().to_vec())?;
+            let val = attr.unescape_value()?.into_owned();
+            new_tag.push_attribute((key.as_str(), val.as_str()));
+        }
+    }
+    if !had_count {
+        let count_str = new_count.to_string();
+        new_tag.push_attribute(("count", count_str.as_str()));
+    }
+    Ok(new_tag)
+}
+
+/// styles.xml tối giản dùng khi file gốc KHÔNG có xl/styles.xml (trường hợp
+/// hiếm, vì openpyxl luôn ghi styles.xml, nhưng vẫn cần fallback an toàn).
+fn default_styles_xml() -> Vec<u8> {
+    br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+<fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>
+<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>"#
+        .to_vec()
+}
+
+
 
 /// Đổi tên 1 sheet trực tiếp trong xl/workbook.xml (chỉ đổi attribute name=
 /// của đúng <sheet> có r:id tương ứng), giữ nguyên mọi thứ khác.

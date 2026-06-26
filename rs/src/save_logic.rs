@@ -64,6 +64,13 @@ pub fn apply_ascii_table(
     // ranges đã lấy ở bước 2.
     new_sheet.merges = original.merges.clone();
 
+    // Giữ nguyên style (bold/italic/màu chữ/màu nền) của từng cell theo
+    // đúng toạ độ (row, col) — vì save_xlsx chỉ ghi đè giá trị text, không
+    // có UI nào cho phép sửa style qua bảng ASCII (style chỉ đổi qua lệnh
+    // setbg riêng), nên style phải giữ y nguyên vị trí cũ.
+    new_sheet.cell_style_id = original.cell_style_id.clone();
+    new_sheet.styles = original.styles.clone();
+
     // Đồng bộ bounds: lấy max giữa dữ liệu mới và merges, nhưng KHÔNG giữ
     // max_row/max_col cũ nếu bảng mới nhỏ hơn — khớp hành vi
     // ws.delete_rows/delete_cols của Python khi new_count < old_count.
