@@ -13,8 +13,14 @@
 //! - Không hỗ trợ shared formula (<f t="shared">), tham chiếu sheet khác
 //!   (Sheet2!A1), hay named range.
 //! - Bộ hàm còn ít: SUM, AVERAGE, MIN, MAX, COUNT, ABS, ROUND, IF, AND, OR,
-//!   NOT, CONCAT/CONCATENATE. Thêm hàm mới chỉ cần sửa `eval_call`.
-//! - Không áp number format (currency/percent/date) — luôn ra số thô.
+//!   NOT, CONCAT/CONCATENATE, ROW, COLUMN, DATE, YEAR, MONTH, DAY,
+//!   WEEKDAY, TODAY, NOW. Thêm hàm mới chỉ cần sửa `eval_call`.
+//! - TODAY()/NOW() dùng giờ UTC của máy chủ (chưa đọc timezone hệ thống),
+//!   có thể lệch 1 ngày/giờ so với giờ địa phương gần nửa đêm.
+//! - Không áp number format (currency/percent/date) — luôn ra số thô, kể
+//!   cả DATE()/TODAY() (trả về SERIAL số, không tự hiển thị dạng dd/mm/yyyy
+//!   — muốn xem ngày dễ đọc, dùng thêm DAY()/MONTH()/YEAR()/WEEKDAY() để
+//!   ghép chuỗi, hoặc CONCAT chúng lại).
 
 use std::collections::{HashMap, HashSet};
 
@@ -444,6 +450,106 @@ impl Parser {
 }
 
 // ----------------------------------------------------------------------------
+// Ngày tháng kiểu Excel (date serial)
+// ----------------------------------------------------------------------------
+//
+// Excel lưu MỌI giá trị ngày/giờ dưới dạng 1 số thực (serial): phần nguyên
+// = số ngày kể từ 1 "epoch giả" 30/12/1899, phần lẻ = giờ trong ngày
+// (0.5 = 12:00 trưa). Dùng epoch 30/12/1899 (thay vì 31/12/1899) là "mẹo"
+// chuẩn mà openpyxl/xlrd cũng dùng để tương thích với lỗi nhuận năm 1900
+// nổi tiếng của Excel/Lotus 1-2-3 (Excel coi 1900 là năm nhuận — SAI —
+// nên có "29/02/1900" ảo, serial 60). Mẹo này cho kết quả ĐÚNG với mọi
+// ngày thực tế từ 01/03/1900 trở đi (gần như 100% trường hợp dùng thật),
+// chỉ sai 1 ngày trong đúng 59 ngày 01/01-28/02/1900 — không ai dùng tới.
+
+/// Hằng số nổi tiếng: serial Excel của ngày 1970-01-01 (Unix epoch) là
+/// 25569 — dùng để chuyển đổi qua lại với SystemTime (vốn tính theo Unix
+/// epoch) mà không cần biết chi tiết thuật toán lịch.
+const EXCEL_EPOCH_OFFSET: i64 = 25569;
+
+/// Thuật toán "days_from_civil" của Howard Hinnant (lịch Gregorian
+/// proleptic, xem http://howardhinnant.github.io/date_algorithms.html) —
+/// trả số ngày kể từ 1970-01-01 cho (năm, tháng 1-12, ngày). Không cần
+/// crate ngày-giờ ngoài, đúng tinh thần "viết tay" của project.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = (m + 9) % 12; // [0, 11]: Mar=0, Apr=1, ..., Feb=11
+    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146097 + doe - 719468
+}
+
+/// Đảo ngược days_from_civil: số ngày kể từ 1970-01-01 -> (năm, tháng, ngày).
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// (năm, tháng, ngày) -> serial Excel. Tự "chuẩn hoá" tháng/ngày tràn ra
+/// ngoài [1,12]/[1,31] giống Excel thật, ví dụ DATE(2024,13,1) =
+/// 2025-01-01, DATE(2024,0,1) = 2023-12-01 (mượn/trả năm tương ứng).
+fn ymd_to_serial(y: i64, m: i64, d: i64) -> i64 {
+    let m0 = m - 1;
+    let y = y + m0.div_euclid(12);
+    let m = m0.rem_euclid(12) + 1;
+    days_from_civil(y, m, d) + EXCEL_EPOCH_OFFSET
+}
+
+/// serial Excel -> (năm, tháng, ngày). Bỏ phần lẻ (giờ trong ngày) nếu có.
+fn serial_to_ymd(serial: i64) -> (i64, i64, i64) {
+    civil_from_days(serial - EXCEL_EPOCH_OFFSET)
+}
+
+/// Số thứ tự ngày trong tuần kiểu Excel WEEKDAY(serial, return_type):
+/// - return_type 1 (mặc định): 1=Chủ Nhật ... 7=Thứ Bảy
+/// - return_type 2: 1=Thứ Hai ... 7=Chủ Nhật
+/// - return_type 3: 0=Thứ Hai ... 6=Chủ Nhật
+fn weekday_number(serial: i64, return_type: i64) -> i64 {
+    let z = serial - EXCEL_EPOCH_OFFSET; // số ngày kể từ 1970-01-01 (Thứ Năm)
+    // dow0: 0=Chủ Nhật .. 6=Thứ Bảy. 1970-01-01 là Thứ Năm (dow0=4).
+    let dow0 = (((z + 4) % 7) + 7) % 7;
+    match return_type {
+        2 => ((dow0 + 6) % 7) + 1,
+        3 => (dow0 + 6) % 7,
+        _ => dow0 + 1,
+    }
+}
+
+/// Serial ngày hôm nay (KHÔNG có giờ) theo giờ UTC của máy chủ — TODO/giới
+/// hạn: chưa đọc timezone hệ thống (tránh phải thêm crate ngày-giờ ngoài),
+/// nên gần nửa đêm có thể lệch 1 ngày so với giờ địa phương VN (UTC+7).
+fn today_serial() -> i64 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    (secs / 86400) as i64 + EXCEL_EPOCH_OFFSET
+}
+
+/// Serial ngày + giờ hiện tại (phần lẻ = tỉ lệ trong ngày), cùng giới hạn
+/// UTC như today_serial().
+fn now_serial() -> f64 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
+    let days = secs / 86400;
+    let frac = (secs % 86400) as f64 / 86400.0;
+    (days + EXCEL_EPOCH_OFFSET) as f64 + frac
+}
+
+// ----------------------------------------------------------------------------
 // Evaluator
 // ----------------------------------------------------------------------------
 
@@ -470,11 +576,15 @@ fn parse_literal(s: &str) -> Value {
 /// Tokenize + parse + eval 1 chuỗi formula (không có dấu "=" đầu) thành
 /// Value. Tách riêng khỏi eval_cell() để luồng mượn `cache`/`visiting` rõ
 /// ràng, dễ đọc hơn là nhúng 1 closure gọi ngay (IIFE) bên trong eval_cell.
+/// `cur_row`/`cur_col` là toạ độ của CHÍNH cell chứa formula này — dùng
+/// cho ROW()/COLUMN() không tham số (xem eval_call).
 fn eval_formula_text(
     formula: &str,
     sheet: &SheetData,
     cache: &mut Cache,
     visiting: &mut Visiting,
+    cur_row: u32,
+    cur_col: u32,
 ) -> Value {
     let toks = match tokenize(formula) {
         Ok(t) => t,
@@ -482,7 +592,7 @@ fn eval_formula_text(
     };
     let mut parser = Parser { toks, pos: 0 };
     match parser.parse_expr() {
-        Ok(ast) => eval_expr(&ast, sheet, cache, visiting),
+        Ok(ast) => eval_expr(&ast, sheet, cache, visiting, cur_row, cur_col),
         Err(e) => e,
     }
 }
@@ -507,7 +617,9 @@ fn eval_cell(
 
     let value = if let Some(formula) = sheet.formulas.get(&(row, col)).cloned() {
         visiting.insert((row, col));
-        let result = eval_formula_text(&formula, sheet, cache, visiting);
+        // row, col chính là toạ độ của cell ĐANG chứa formula này -> dùng
+        // làm cur_row/cur_col cho ROW()/COLUMN() không tham số bên trong.
+        let result = eval_formula_text(&formula, sheet, cache, visiting, row, col);
         visiting.remove(&(row, col));
         result
     } else {
@@ -518,12 +630,19 @@ fn eval_cell(
     value
 }
 
-fn eval_expr(e: &Expr, sheet: &SheetData, cache: &mut Cache, visiting: &mut Visiting) -> Value {
+fn eval_expr(
+    e: &Expr,
+    sheet: &SheetData,
+    cache: &mut Cache,
+    visiting: &mut Visiting,
+    cur_row: u32,
+    cur_col: u32,
+) -> Value {
     match e {
         Expr::Num(n) => Value::Number(*n),
         Expr::Str(s) => Value::Text(s.clone()),
         Expr::Bool(b) => Value::Bool(*b),
-        Expr::Neg(inner) => match eval_expr(inner, sheet, cache, visiting).as_number() {
+        Expr::Neg(inner) => match eval_expr(inner, sheet, cache, visiting, cur_row, cur_col).as_number() {
             Ok(n) => Value::Number(-n),
             Err(e) => e,
         },
@@ -535,17 +654,17 @@ fn eval_expr(e: &Expr, sheet: &SheetData, cache: &mut Cache, visiting: &mut Visi
         // là 1 giá trị đơn -> giống Excel trả "#VALUE!".
         Expr::RangeRef(..) => Value::Error("#VALUE!".to_string()),
         Expr::BinOp(op, l, r) => {
-            let lv = eval_expr(l, sheet, cache, visiting);
+            let lv = eval_expr(l, sheet, cache, visiting, cur_row, cur_col);
             if let Value::Error(e) = &lv {
                 return Value::Error(e.clone());
             }
-            let rv = eval_expr(r, sheet, cache, visiting);
+            let rv = eval_expr(r, sheet, cache, visiting, cur_row, cur_col);
             if let Value::Error(e) = &rv {
                 return Value::Error(e.clone());
             }
             apply_binop(op, lv, rv)
         }
-        Expr::Call(name, args) => eval_call(name, args, sheet, cache, visiting),
+        Expr::Call(name, args) => eval_call(name, args, sheet, cache, visiting, cur_row, cur_col),
     }
 }
 
@@ -596,6 +715,8 @@ fn collect_values(
     sheet: &SheetData,
     cache: &mut Cache,
     visiting: &mut Visiting,
+    cur_row: u32,
+    cur_col: u32,
 ) -> Vec<Value> {
     match e {
         Expr::RangeRef(a, b) => {
@@ -609,7 +730,7 @@ fn collect_values(
             }
             out
         }
-        other => vec![eval_expr(other, sheet, cache, visiting)],
+        other => vec![eval_expr(other, sheet, cache, visiting, cur_row, cur_col)],
     }
 }
 
@@ -648,6 +769,8 @@ fn eval_call(
     sheet: &SheetData,
     cache: &mut Cache,
     visiting: &mut Visiting,
+    cur_row: u32,
+    cur_col: u32,
 ) -> Value {
     // IF cần short-circuit (chỉ eval nhánh được chọn) -> xử lý riêng, KHÔNG
     // đi qua bước "trải toàn bộ tham số" ở dưới (range trong IF không có
@@ -657,24 +780,40 @@ fn eval_call(
         if args.is_empty() {
             return Value::Error("#VALUE!".to_string());
         }
-        let cond = eval_expr(&args[0], sheet, cache, visiting);
+        let cond = eval_expr(&args[0], sheet, cache, visiting, cur_row, cur_col);
         if let Value::Error(e) = &cond {
             return Value::Error(e.clone());
         }
         return if truthy(&cond) {
             args.get(1)
-                .map(|e| eval_expr(e, sheet, cache, visiting))
+                .map(|e| eval_expr(e, sheet, cache, visiting, cur_row, cur_col))
                 .unwrap_or(Value::Bool(true))
         } else {
             args.get(2)
-                .map(|e| eval_expr(e, sheet, cache, visiting))
+                .map(|e| eval_expr(e, sheet, cache, visiting, cur_row, cur_col))
                 .unwrap_or(Value::Bool(false))
+        };
+    }
+
+    // ROW()/COLUMN() cần nhìn trực tiếp vào AST tham số (CellRef/RangeRef)
+    // để lấy TOẠ ĐỘ, không phải GIÁ TRỊ của cell đó -> xử lý riêng, không
+    // qua bước "trải thành Value" ở dưới (collect_values sẽ làm mất thông
+    // tin toạ độ, chỉ còn lại nội dung cell).
+    if name == "ROW" || name == "COLUMN" {
+        return match args.first() {
+            None => Value::Number((if name == "ROW" { cur_row } else { cur_col }) as f64),
+            Some(Expr::CellRef(r)) | Some(Expr::RangeRef(r, _)) => match ref_to_col_row(r) {
+                Ok((c, rr)) => Value::Number((if name == "ROW" { rr } else { c }) as f64),
+                Err(_) => Value::Error("#REF!".to_string()),
+            },
+            // ROW(10) / ROW("x")... không có nghĩa trong Excel.
+            Some(_) => Value::Error("#VALUE!".to_string()),
         };
     }
 
     let flat: Vec<Value> = args
         .iter()
-        .flat_map(|a| collect_values(a, sheet, cache, visiting))
+        .flat_map(|a| collect_values(a, sheet, cache, visiting, cur_row, cur_col))
         .collect();
 
     match name {
@@ -714,6 +853,36 @@ fn eval_call(
         "CONCAT" | "CONCATENATE" => {
             Value::Text(flat.iter().map(Value::to_display_string).collect::<Vec<_>>().concat())
         }
+
+        // --- Ngày/giờ (xem khối hàm date-serial phía trên evaluate_all) ---
+        "DATE" => {
+            let y = flat.first().and_then(|v| v.as_number().ok()).unwrap_or(1900.0) as i64;
+            let m = flat.get(1).and_then(|v| v.as_number().ok()).unwrap_or(1.0) as i64;
+            let d = flat.get(2).and_then(|v| v.as_number().ok()).unwrap_or(1.0) as i64;
+            Value::Number(ymd_to_serial(y, m, d) as f64)
+        }
+        "YEAR" => match flat.first().and_then(|v| v.as_number().ok()) {
+            Some(serial) => Value::Number(serial_to_ymd(serial as i64).0 as f64),
+            None => Value::Error("#VALUE!".to_string()),
+        },
+        "MONTH" => match flat.first().and_then(|v| v.as_number().ok()) {
+            Some(serial) => Value::Number(serial_to_ymd(serial as i64).1 as f64),
+            None => Value::Error("#VALUE!".to_string()),
+        },
+        "DAY" => match flat.first().and_then(|v| v.as_number().ok()) {
+            Some(serial) => Value::Number(serial_to_ymd(serial as i64).2 as f64),
+            None => Value::Error("#VALUE!".to_string()),
+        },
+        "WEEKDAY" => match flat.first().and_then(|v| v.as_number().ok()) {
+            Some(serial) => {
+                let return_type = flat.get(1).and_then(|v| v.as_number().ok()).unwrap_or(1.0) as i64;
+                Value::Number(weekday_number(serial as i64, return_type) as f64)
+            }
+            None => Value::Error("#VALUE!".to_string()),
+        },
+        "TODAY" => Value::Number(today_serial() as f64),
+        "NOW" => Value::Number(now_serial()),
+
         _ => Value::Error("#NAME?".to_string()),
     }
 }

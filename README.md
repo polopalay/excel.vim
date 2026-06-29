@@ -210,37 +210,19 @@ Sheet1 / C15  =SUM(A1:A10)
 
 ---
 
-# Formula Engine
+### Formula Engine
 
-By default, worksheets display calculated values, just like Microsoft Excel.
-
-You can toggle between displaying calculated values and the original formulas.
-
-Show formulas:
-
-```vim
-:ExcelShowFormula
-```
-
-Example:
-
-Calculated values:
-
-```text
-+--------+
-| 125    |
-+--------+
-```
-
-Formula view:
-
-```text
-+--------------+
-| =SUM(A1:A5)  |
-+--------------+
-```
-
-Whenever the workbook is saved, all supported formulas are recalculated automatically before being written back to the `.xlsx` file.
+* Display calculated formula results
+* View the original formula of the current cell from the statusline
+* Toggle between calculated values and formulas
+* Automatically recalculate formulas after editing
+* Formula dependency evaluation
+* Circular reference detection
+* Built-in formula parser and evaluator
+* Built-in date and time functions
+* Supports Excel date serial values
+* Supports relative formula references
+* No external calculation engine required
 
 ---
 
@@ -302,6 +284,15 @@ OR
 NOT
 CONCAT
 CONCATENATE
+ROW
+COLUMN
+DATE
+YEAR
+MONTH
+DAY
+WEEKDAY
+TODAY
+NOW
 ```
 
 Additional features
@@ -309,6 +300,61 @@ Additional features
 * Automatic dependency evaluation
 * Circular reference detection (`#CIRCULAR!`)
 * Formula result caching
+* Excel date serial support
+* Relative and absolute cell references (`A1`, `$A1`, `A$1`, `$A$1`)
+* Automatic reference adjustment when applying formulas
+
+---
+
+# Supported Features
+
+| Feature                      | Status |
+| ---------------------------- | ------ |
+| Read XLSX                    | ✓      |
+| Write XLSX                   | ✓      |
+| Formula Evaluation           | ✓      |
+| Formula Viewer               | ✓      |
+| Automatic Recalculation      | ✓      |
+| Dependency Evaluation        | ✓      |
+| Date & Time Functions        | ✓      |
+| ROW / COLUMN                 | ✓      |
+| Formula Reference Shifting   | ✓      |
+| Circular Reference Detection | ✓      |
+| Multiple Worksheets          | ✓      |
+| Add Worksheet                | ✓      |
+| Rename Worksheet             | ✓      |
+| Delete Worksheet             | ✓      |
+| Merge Cells                  | ✓      |
+| Unmerge Cells                | ✓      |
+| Preserve Merged Cells        | ✓      |
+| Bold                         | ✓      |
+| Italic                       | ✓      |
+| Font Color                   | ✓      |
+| Background Color             | ✓      |
+| Cell Navigation              | ✓      |
+| Statusline Formula Preview   | ✓      |
+| XLS Format                   | ✗      |
+| Charts Editing               | ✗      |
+| Embedded Images              | ✗      |
+| Pivot Tables                 | ✗      |
+| VBA Macros                   | ✗      |
+
+---
+
+# Limitations
+
+* Only `.xlsx` files are supported
+* Cross-worksheet references are not yet supported
+* Shared formulas are not yet supported
+* Named ranges are not yet supported
+* `TODAY()` and `NOW()` currently use UTC time
+* Date values are stored as native Excel serial numbers
+* Number formatting (currency, percentage, and date display formats) is not yet applied automatically
+* Charts are not editable
+* Embedded images are ignored
+* Pivot tables are not editable
+* VBA macros are preserved but cannot be edited
+* Extremely complex Excel layouts may not render identically to Microsoft Excel
 
 ---
 
