@@ -1,6 +1,7 @@
 mod coord;
 mod display;
 mod error;
+mod formula;
 mod model;
 mod save_logic;
 mod sheet_ops;
@@ -34,7 +35,10 @@ fn run(args: &[String]) -> AppResult<()> {
         "open" => {
             let path = require_arg(args, 2, "xlsx_file")?;
             let sheet = args.get(3).map(|s| s.as_str());
-            cmd_open(path, sheet)
+            // args[4] = "1" -> hiện TEXT công thức thay vì giá trị đã tính
+            // (mode :ExcelShowFormula), mặc định "0"/không truyền = tắt.
+            let show_formulas = args.get(4).map(|s| s == "1").unwrap_or(false);
+            cmd_open(path, sheet, show_formulas)
         }
         "save" => {
             let path = require_arg(args, 2, "xlsx_file")?;
@@ -99,6 +103,12 @@ fn run(args: &[String]) -> AppResult<()> {
             let range_ref = require_arg(args, 3, "cell_or_range")?;
             let sheet = args.get(4).map(|s| s.as_str());
             cmd_unmerge(path, range_ref, sheet)
+        }
+        "applyformula" => {
+            let path = require_arg(args, 2, "xlsx_file")?;
+            let cell_refs = require_arg(args, 3, "cell_refs")?;
+            let sheet = args.get(4).map(|s| s.as_str());
+            cmd_apply_formula(path, cell_refs, sheet)
         }
         other => Err(AppError(format!("Unknown mode: {other}"))),
     }
@@ -341,7 +351,7 @@ impl StyleAction {
 // Commands
 // ----------------------------------------------------------------------------
 
-fn cmd_open(path: &str, sheet_name: Option<&str>) -> AppResult<()> {
+fn cmd_open(path: &str, sheet_name: Option<&str>, show_formulas: bool) -> AppResult<()> {
     ensure_workbook(path)?;
     let mut archive = open_archive(path)?;
     let entries = load_sheet_entries(&mut archive)?;
@@ -352,17 +362,28 @@ fn cmd_open(path: &str, sheet_name: Option<&str>) -> AppResult<()> {
     let sheet_xml = xlsx_read::read_zip_entry(&mut archive, &target.path)?;
     let sheet = xlsx_read::parse_sheet_xml(&sheet_xml, &shared, &styles)?;
 
-    print_table_with_style_metadata(&sheet);
+    if show_formulas {
+        // Mode :ExcelShowFormula: hiện TEXT công thức ("=SUM(...)") thay
+        // vì giá trị đã tính, trong bảng ASCII — merge/style/cellmap vẫn
+        // tính từ sheet GỐC nên hoàn toàn nhất quán, chỉ nội dung hiển thị
+        // của riêng các cell có công thức là khác.
+        print_table_with_style_metadata(&formula::sheet_with_formula_text_shown(&sheet));
+    } else {
+        print_table_with_style_metadata(&sheet);
+    }
     Ok(())
 }
 
-/// In bảng ASCII ra stdout, theo sau bởi 2 khối metadata:
+/// In bảng ASCII ra stdout, theo sau bởi 3 khối metadata:
 ///   1. @@STYLE@@: style hiển thị (bold/italic/màu) cho các cell có style
 ///      khác mặc định — dùng để highlight.
 ///   2. @@CELLMAP@@: map TOÀN BỘ vị trí buffer -> địa chỉ cell Excel gốc —
 ///      dùng để file .vim xác định cursor/Visual selection đang ở cell nào
 ///      (cần cho :ExcelSetBg/:ExcelSetFg/:ExcelBold/:ExcelItalic khi gọi
 ///      không kèm tham số cell, lấy từ vị trí con trỏ).
+///   3. @@FORMULA@@: map cell_ref -> formula text (kèm "=" đầu) của các
+///      cell có công thức — dùng để Vim hiển thị formula khi con trỏ đứng
+///      trên cell đó (xem ExcelStatusLine() trong plugin/excel.vim).
 ///
 /// Format khối @@STYLE@@ (mỗi dòng 1 cell có style khác mặc định):
 ///   <line>\t<col_start>\t<col_end>\t<bold>\t<italic>\t<font_hex|->\t<bg_hex|->
@@ -417,6 +438,20 @@ fn print_table_with_style_metadata(sheet: &model::SheetData) {
         }
     }
     println!("@@CELLMAPEND@@");
+
+    // 3. @@FORMULA@@: map cell_ref -> formula text (kèm dấu "=" đầu, để
+    //    Vim hiển thị y như formula bar của Excel) — dùng cho:
+    //    - Vim tra cứu "ô đang ở vị trí cursor có công thức gì" (hover).
+    //    Format mỗi dòng: <cell_ref>\t=<formula_text>
+    println!("@@FORMULA@@");
+    for (&(row, col), formula) in &sheet.formulas {
+        let cell_ref = coord::col_row_to_ref(col, row);
+        // Thoát tab/newline trong formula text (hiếm gặp, nhưng an toàn)
+        // để không phá vỡ format 1-dòng-1-formula khi Vim split("\t").
+        let safe_formula = formula.replace('\t', " ").replace('\n', " ");
+        println!("{cell_ref}\t={safe_formula}");
+    }
+    println!("@@FORMULAEND@@");
 }
 
 fn cmd_save(path: &str, txt_file: &str, sheet_name: Option<&str>) -> AppResult<()> {
@@ -570,6 +605,66 @@ fn cmd_unmerge(path: &str, range_ref: &str, sheet_name: Option<&str>) -> AppResu
     if removed == 0 {
         return Err(AppError(format!("Không có vùng gộp nào trong {range_ref}")));
     }
+
+    let new_sheet_xml = xlsx_write::render_sheet_xml(&sheet)?;
+    let original_styles_xml = xlsx_read::read_zip_entry(&mut archive, "xl/styles.xml").ok();
+    let synced_styles_xml = xlsx_write::sync_styles_xml(original_styles_xml.as_deref(), &sheet.styles)?;
+
+    let mut replacements: Vec<(&str, Vec<u8>)> = vec![(target.path.as_str(), new_sheet_xml)];
+    if let Some(new_styles_xml) = synced_styles_xml {
+        replacements.push(("xl/styles.xml", new_styles_xml));
+    }
+
+    let new_xlsx_bytes = xlsx_write::write_xlsx_replacing_entries(&mut archive, &replacements)?;
+    atomic_write(path, &new_xlsx_bytes)?;
+    Ok(())
+}
+
+/// Lệnh "Apply Formula" (:ExcelApplyFormula) — tương đương kéo fill handle
+/// trong Excel: ô ĐẦU TIÊN trong `cell_refs` phải có sẵn công thức (ô
+/// "mẫu"), các ô còn lại sẽ nhận CHÍNH công thức đó nhưng dịch cell
+/// reference theo độ lệch (row, col) so với ô mẫu (xem
+/// formula::shift_formula_refs). Hoạt động với selection dạng cột, dòng,
+/// hoặc cả khối 2D vì delta được tính riêng cho mỗi ô đích.
+///
+/// `cell_refs` là danh sách cell_ref cách nhau bởi dấu phẩy (KHÔNG dùng
+/// dạng "B2:B10", vì thứ tự phần tử quan trọng — ô đầu tiên trong danh
+/// sách luôn được coi là ô mẫu, parse_cell_or_range giữ đúng thứ tự liệt
+/// kê khi input không chứa ":").
+fn cmd_apply_formula(path: &str, cell_refs: &str, sheet_name: Option<&str>) -> AppResult<()> {
+    ensure_workbook(path)?;
+    let mut archive = open_archive(path)?;
+    let entries = load_sheet_entries(&mut archive)?;
+    let target = find_sheet(&entries, sheet_name)?.clone();
+    let shared = load_shared_strings(&mut archive)?;
+    let styles = load_styles(&mut archive)?;
+
+    let sheet_xml = xlsx_read::read_zip_entry(&mut archive, &target.path)?;
+    let mut sheet = xlsx_read::parse_sheet_xml(&sheet_xml, &shared, &styles)?;
+
+    let coords = parse_cell_or_range(cell_refs)?;
+    let &(anchor_col, anchor_row) = coords
+        .first()
+        .ok_or_else(|| AppError("Danh sách ô rỗng".to_string()))?;
+    let anchor_formula = sheet
+        .formulas
+        .get(&(anchor_row, anchor_col))
+        .cloned()
+        .ok_or_else(|| {
+            AppError(format!(
+                "Ô {} (ô đầu tiên trong vùng chọn) không có công thức để áp dụng",
+                coord::col_row_to_ref(anchor_col, anchor_row)
+            ))
+        })?;
+
+    for &(col, row) in &coords[1..] {
+        let row_delta = row as i64 - anchor_row as i64;
+        let col_delta = col as i64 - anchor_col as i64;
+        let shifted = formula::shift_formula_refs(&anchor_formula, row_delta, col_delta);
+        sheet.formulas.insert((row, col), shifted);
+    }
+
+    formula::evaluate_all(&mut sheet);
 
     let new_sheet_xml = xlsx_write::render_sheet_xml(&sheet)?;
     let original_styles_xml = xlsx_read::read_zip_entry(&mut archive, "xl/styles.xml").ok();

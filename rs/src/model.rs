@@ -73,6 +73,11 @@ pub struct SheetData {
     /// dùng để hiển thị (xuất metadata cho Vim) và để tính style mới khi
     /// user đổi màu nền qua lệnh setbg.
     pub styles: Vec<CellStyle>,
+    /// Công thức GỐC (không có dấu "=" ở đầu) của các cell có thẻ <f> trong
+    /// XML, ví dụ {(5,2): "SUM(A1:A4)"}. `cells` vẫn lưu giá trị HIỂN THỊ
+    /// (kết quả đã tính) — display.rs/table.rs không cần biết gì về
+    /// formula cả, chúng chỉ đọc `cells` như bình thường.
+    pub formulas: BTreeMap<(u32, u32), String>,
 }
 
 impl SheetData {

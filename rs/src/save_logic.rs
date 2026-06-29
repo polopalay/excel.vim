@@ -56,7 +56,38 @@ pub fn apply_ascii_table(
             // \\n (escape hiển thị trong bảng ASCII) -> newline thật,
             // đúng như Python: value.replace("\\n", "\n")
             let real_value = value.replace("\\n", "\n");
-            new_sheet.set(r_idx as u32 + 1, real_col, real_value);
+            let row_num = r_idx as u32 + 1;
+
+            if let Some(formula_text) = real_value.strip_prefix('=') {
+                // User gõ công thức mới (hoặc sửa lại công thức cũ) trực
+                // tiếp trong bảng. Giá trị HIỂN THỊ sẽ được
+                // formula::evaluate_all tính lại sau khi new_sheet dựng
+                // xong — tạm set raw text vào đây để không bị coi là rỗng
+                // nếu evaluate_all gặp lỗi bất ngờ.
+                new_sheet
+                    .formulas
+                    .insert((row_num, real_col), formula_text.to_string());
+                new_sheet.set(row_num, real_col, real_value.clone());
+            } else if original.formulas.contains_key(&(row_num, real_col))
+                && original.get(row_num, real_col).unwrap_or("") == real_value.as_str()
+            {
+                // QUAN TRỌNG: cell này có formula ở file gốc và user KHÔNG
+                // sửa gì (bảng ASCII chỉ hiển thị giá trị cache, không hiển
+                // thị "=..."). Nếu không xử lý riêng case này, mọi lần lưu
+                // sẽ làm "='" -> chỉ literal -> XOÁ MẤT formula của mọi cell
+                // user không động tới. Giữ lại formula cũ ở đây.
+                new_sheet
+                    .formulas
+                    .insert((row_num, real_col), original.formulas[&(row_num, real_col)].clone());
+                new_sheet.set(row_num, real_col, real_value);
+            } else {
+                // Literal value bình thường — kể cả trường hợp cell này
+                // TRƯỚC ĐÓ có formula nhưng user đã gõ đè 1 giá trị khác
+                // (không phải "="): coi như họ chủ động xoá formula, thay
+                // bằng giá trị tĩnh (khớp hành vi "what you see is what
+                // you get" của bảng ASCII).
+                new_sheet.set(row_num, real_col, real_value);
+            }
         }
     }
 
@@ -88,6 +119,12 @@ pub fn apply_ascii_table(
     if new_sheet.max_col < min_col {
         new_sheet.max_col = min_col;
     }
+
+    // Tính lại mọi công thức (cũ giữ nguyên từ vòng lặp set() phía trên +
+    // công thức mới user vừa nhập) SAU KHI toàn bộ cell/merge/style đã ổn
+    // định, để công thức có thể tham chiếu tới bất kỳ cell nào trong sheet
+    // bất kể thứ tự nhập liệu.
+    crate::formula::evaluate_all(&mut new_sheet);
 
     Ok(new_sheet)
 }

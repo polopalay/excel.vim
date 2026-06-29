@@ -39,6 +39,25 @@ fn xml_escape_text(s: &str) -> String {
     out
 }
 
+/// Xác định attribute t="..." và text ghi vào <v> cho 1 cell CÓ công thức,
+/// dựa trên giá trị HIỂN THỊ (đã cache) của nó:
+///   - Số hợp lệ -> không cần t (mặc định numeric), v = chính số đó
+///   - "TRUE"/"FALSE" -> t="b", v = "1"/"0"
+///   - Còn lại (text/lỗi #REF! #DIV/0! ...) -> t="str", v = chính text đó
+///     (lỗi công thức Excel chuẩn dùng t="e", nhưng dùng "str" vẫn hiển
+///     thị đúng nội dung lỗi dạng text, đủ dùng cho mục đích của plugin)
+fn formula_cached_type_and_value(value: &str) -> (Option<&'static str>, String) {
+    if value.parse::<f64>().is_ok() {
+        (None, value.to_string())
+    } else if value == "TRUE" {
+        (Some("b"), "1".to_string())
+    } else if value == "FALSE" {
+        (Some("b"), "0".to_string())
+    } else {
+        (Some("str"), value.to_string())
+    }
+}
+
 /// Render lại 1 sheet XML hoàn toàn mới từ SheetData, dùng cấu trúc OOXML
 /// tối giản nhưng hợp lệ: <worksheet><sheetData><row><c>...</c></row></sheetData>
 /// <mergeCells>...</mergeCells></worksheet>
@@ -108,22 +127,49 @@ pub fn render_sheet_xml(sheet: &SheetData) -> AppResult<Vec<u8>> {
                         if style_id.unwrap_or(0) != 0 {
                             c_tag.push_attribute(("s", sid_str.as_str()));
                         }
-                        c_tag.push_attribute(("t", "inlineStr"));
-                        w.write_event(Event::Start(c_tag))?;
 
-                        w.write_event(Event::Start(BytesStart::new("is")))?;
+                        if let Some(formula) = sheet.formulas.get(&(row, col)) {
+                            // Cell có công thức: ghi <f>...</f><v>...</v>,
+                            // KHÔNG dùng inlineStr — Excel cần <v> đúng
+                            // kiểu (number/string/bool) để hiển thị ngay
+                            // khi mở file, trước khi tự tính lại công thức.
+                            let (t_attr, v_text) = formula_cached_type_and_value(value);
+                            if let Some(t) = t_attr {
+                                c_tag.push_attribute(("t", t));
+                            }
+                            w.write_event(Event::Start(c_tag))?;
 
-                        let mut t_tag = BytesStart::new("t");
-                        // Giữ khoảng trắng đầu/cuối nguyên vẹn nếu có.
-                        t_tag.push_attribute(("xml:space", "preserve"));
-                        w.write_event(Event::Start(t_tag))?;
-                        w.write_event(Event::Text(BytesText::from_escaped(xml_escape_text(
-                            value,
-                        ))))?;
-                        w.write_event(Event::End(quick_xml::events::BytesEnd::new("t")))?;
+                            w.write_event(Event::Start(BytesStart::new("f")))?;
+                            w.write_event(Event::Text(BytesText::from_escaped(xml_escape_text(
+                                formula,
+                            ))))?;
+                            w.write_event(Event::End(quick_xml::events::BytesEnd::new("f")))?;
 
-                        w.write_event(Event::End(quick_xml::events::BytesEnd::new("is")))?;
-                        w.write_event(Event::End(quick_xml::events::BytesEnd::new("c")))?;
+                            w.write_event(Event::Start(BytesStart::new("v")))?;
+                            w.write_event(Event::Text(BytesText::from_escaped(xml_escape_text(
+                                &v_text,
+                            ))))?;
+                            w.write_event(Event::End(quick_xml::events::BytesEnd::new("v")))?;
+
+                            w.write_event(Event::End(quick_xml::events::BytesEnd::new("c")))?;
+                        } else {
+                            c_tag.push_attribute(("t", "inlineStr"));
+                            w.write_event(Event::Start(c_tag))?;
+
+                            w.write_event(Event::Start(BytesStart::new("is")))?;
+
+                            let mut t_tag = BytesStart::new("t");
+                            // Giữ khoảng trắng đầu/cuối nguyên vẹn nếu có.
+                            t_tag.push_attribute(("xml:space", "preserve"));
+                            w.write_event(Event::Start(t_tag))?;
+                            w.write_event(Event::Text(BytesText::from_escaped(xml_escape_text(
+                                value,
+                            ))))?;
+                            w.write_event(Event::End(quick_xml::events::BytesEnd::new("t")))?;
+
+                            w.write_event(Event::End(quick_xml::events::BytesEnd::new("is")))?;
+                            w.write_event(Event::End(quick_xml::events::BytesEnd::new("c")))?;
+                        }
                     }
                 }
             }

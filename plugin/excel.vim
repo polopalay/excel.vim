@@ -384,17 +384,19 @@ function! s:ExcelResolveTargetCells(line1, line2) abort
     return [l:ref]
 endfunction
 " ----------------------------------------------------------------------------
-" s:ExcelParseStyleMeta(): tách khối @@STYLE@@...@@END@@ và
-" @@CELLMAP@@...@@CELLMAPEND@@ ra khỏi output thô của binary excel.
-" Trả về [bang_ascii, danh_sach_style, danh_sach_cellmap].
+" s:ExcelParseStyleMeta(): tách khối @@STYLE@@...@@END@@,
+" @@CELLMAP@@...@@CELLMAPEND@@ và @@FORMULA@@...@@FORMULAEND@@ ra khỏi
+" output thô của binary excel.
+" Trả về [bang_ascii, danh_sach_style, danh_sach_cellmap, dict_formula].
 " - Mỗi phần tử style: [line, col_start, col_end, bold, italic, font_hex, bg_hex]
 " - Mỗi phần tử cellmap: [line, col_start, col_end, cell_ref]
+" - dict_formula: {cell_ref: formula_text} (formula_text có dấu "=" đầu)
 " với line/col_start/col_end/bold/italic đã convert sang Number.
 " ----------------------------------------------------------------------------
 function! s:ExcelParseStyleMeta(output) abort
     let l:marker_idx = index(a:output, '@@STYLE@@')
     if l:marker_idx == -1
-        return [a:output, [], []]
+        return [a:output, [], [], {}]
     endif
     let l:table_lines = a:output[0 : l:marker_idx - 1]
     " Tìm '@@END@@' chỉ trong phần SAU marker (tự cắt list trước khi index()
@@ -431,6 +433,7 @@ function! s:ExcelParseStyleMeta(output) abort
 
     " --- Parse khối @@CELLMAP@@...@@CELLMAPEND@@ (nếu có) ---
     let l:cellmap = []
+    let l:after_cellmap_end = []
     let l:cm_marker_idx = index(l:after_style_end, '@@CELLMAP@@')
     if l:cm_marker_idx != -1
         let l:after_cm_marker = l:after_style_end[l:cm_marker_idx + 1 :]
@@ -438,6 +441,9 @@ function! s:ExcelParseStyleMeta(output) abort
         let l:cellmap_lines = l:cm_end_idx_rel == -1
                     \ ? l:after_cm_marker
                     \ : l:after_cm_marker[0 : l:cm_end_idx_rel - 1]
+        let l:after_cellmap_end = l:cm_end_idx_rel == -1
+                    \ ? []
+                    \ : l:after_cm_marker[l:cm_end_idx_rel + 1 :]
         for l:raw in l:cellmap_lines
             if empty(l:raw)
                 continue
@@ -455,12 +461,38 @@ function! s:ExcelParseStyleMeta(output) abort
         endfor
     endif
 
+    " --- Parse khối @@FORMULA@@...@@FORMULAEND@@ (nếu có) ---
+    " Dict cell_ref -> formula text (đã có dấu "=" đầu, vd "=SUM(A1:A4)"),
+    " dùng để hiển thị formula khi con trỏ đứng trên 1 cell (xem
+    " s:ExcelUpdateStatusCell / ExcelStatusLine).
+    let l:formulas = {}
+    let l:fm_marker_idx = index(l:after_cellmap_end, '@@FORMULA@@')
+    if l:fm_marker_idx != -1
+        let l:after_fm_marker = l:after_cellmap_end[l:fm_marker_idx + 1 :]
+        let l:fm_end_idx_rel = index(l:after_fm_marker, '@@FORMULAEND@@')
+        let l:formula_lines = l:fm_end_idx_rel == -1
+                    \ ? l:after_fm_marker
+                    \ : l:after_fm_marker[0 : l:fm_end_idx_rel - 1]
+        for l:raw in l:formula_lines
+            if empty(l:raw)
+                continue
+            endif
+            " Chỉ tách ở tab ĐẦU TIÊN (formula text về lý thuyết không nên
+            " chứa tab, nhưng phòng hờ vẫn an toàn hơn split() thường).
+            let l:tab_idx = stridx(l:raw, "\t")
+            if l:tab_idx == -1
+                continue
+            endif
+            let l:formulas[l:raw[0 : l:tab_idx - 1]] = l:raw[l:tab_idx + 1 :]
+        endfor
+    endif
+
     " Loại bỏ dòng trống cuối bảng ASCII (giữa bảng và marker @@STYLE@@,
     " println! của Rust luôn thêm 1 dòng trống sau bảng).
     while !empty(l:table_lines) && l:table_lines[-1] ==# ''
         call remove(l:table_lines, -1)
     endwhile
-    return [l:table_lines, l:styles, l:cellmap]
+    return [l:table_lines, l:styles, l:cellmap, l:formulas]
 endfunction
 " ----------------------------------------------------------------------------
 " ExcelCmd(): hàm dùng chung để gọi binary excel với 1 mode
@@ -486,9 +518,10 @@ endfunction
 " Dùng chung cho ExcelOpen/ExcelSave/ExcelSheetOpen để tránh lặp code.
 " ----------------------------------------------------------------------------
 function! s:ExcelLoadIntoBuffer(raw_output) abort
-    let [l:table_lines, l:styles, l:cellmap] = s:ExcelParseStyleMeta(a:raw_output)
+    let [l:table_lines, l:styles, l:cellmap, l:formulas] = s:ExcelParseStyleMeta(a:raw_output)
     let b:xlsx_style_meta = l:styles
     let b:xlsx_cell_map = l:cellmap
+    let b:xlsx_formula_map = l:formulas
     setlocal modifiable
     silent %delete _
     call setline(1, l:table_lines)
@@ -496,19 +529,46 @@ function! s:ExcelLoadIntoBuffer(raw_output) abort
     call s:ExcelUpdateStatusCell()
 endfunction
 " ----------------------------------------------------------------------------
+" s:ExcelReloadBuffer(sheet): gọi binary excel với mode 'open' cho sheet
+" `sheet`, TỰ ĐỘNG kèm flag hiện công thức nếu b:xlsx_show_formulas đang
+" bật (xem ExcelShowFormula()), rồi nạp kết quả vào buffer. Dùng CHUNG cho
+" MỌI nơi cần "đã ghi file xong, giờ load lại để hiển thị bản chuẩn"
+" (ExcelOpen, ExcelSave, ExcelSheetOpen, sau khi setbg/bold/merge/
+" unmerge/applyformula...) — gom 1 chỗ để flag show-formula luôn được áp
+" dụng nhất quán ở mọi điểm reload, không phải sửa rải rác từng hàm.
+" Trả về 1 nếu thành công, 0 nếu lỗi (đã echoerr nội dung lỗi từ binary).
+" ----------------------------------------------------------------------------
+function! s:ExcelReloadBuffer(sheet) abort
+    let l:flag = get(b:, 'xlsx_show_formulas', 0) ? '1' : '0'
+    let l:output = s:ExcelCmd('open', a:sheet, l:flag)
+    if v:shell_error
+        echoerr join(l:output, "\n")
+        return 0
+    endif
+    call s:ExcelLoadIntoBuffer(l:output)
+    return 1
+endfunction
+" ----------------------------------------------------------------------------
 " s:ExcelUpdateStatusCell(): cập nhật biến buffer-local `b:xlsx_status_cell`
-" với địa chỉ ô Excel tại con trỏ hiện tại (vd "B3" hoặc "" nếu ngoài bảng).
+" với địa chỉ ô Excel tại con trỏ hiện tại (vd "B3" hoặc "" nếu ngoài bảng),
+" và `b:xlsx_status_formula` với formula của ô đó (vd "=SUM(A1:A4)", hoặc
+" "" nếu ô không có công thức) — đây chính là cơ chế "hover" hiển thị
+" formula: vì terminal Vim không có khái niệm hover bằng chuột, ta dùng lại
+" đúng cơ chế cursor đã có sẵn của statusline (xem ExcelStatusLine()).
 " Hàm này được gọi qua autocmd CursorMoved/CursorMovedI để statusline luôn
 " hiển thị đúng vị trí. Dùng cache thay vì gọi trực tiếp trong statusline
 " để tránh overhead — statusline có thể bị Vim redraw rất thường xuyên.
 " ----------------------------------------------------------------------------
 function! s:ExcelUpdateStatusCell() abort
     let b:xlsx_status_cell = s:ExcelCellAtCursor()
+    let b:xlsx_status_formula = get(get(b:, 'xlsx_formula_map', {}), b:xlsx_status_cell, '')
 endfunction
 " ----------------------------------------------------------------------------
 " ExcelStatusLine(): hàm gọi từ 'statusline' của Vim để hiển thị địa chỉ ô
-" Excel tại con trỏ. Format: "Sheet1 / B3 — file.xlsx". Trả về string đã
-" thoát các ký tự đặc biệt để dùng trực tiếp trong %{...} của statusline.
+" Excel tại con trỏ, kèm formula của ô đó nếu có. Format:
+" "Sheet1 / B3 =SUM(A1:A4) — file.xlsx" (phần formula chỉ xuất hiện khi ô
+" hiện tại có công thức). Trả về string đã thoát các ký tự đặc biệt để
+" dùng trực tiếp trong %{...} của statusline.
 " ----------------------------------------------------------------------------
 function! ExcelStatusLine() abort
     if !exists('b:xlsx_file')
@@ -517,7 +577,9 @@ function! ExcelStatusLine() abort
     let l:sheet = exists('b:xlsx_sheet') ? b:xlsx_sheet : '?'
     let l:cell = get(b:, 'xlsx_status_cell', '')
     let l:cell_part = empty(l:cell) ? '(outside table)' : l:cell
-    return l:sheet . ' / ' . l:cell_part
+    let l:formula = get(b:, 'xlsx_status_formula', '')
+    let l:formula_part = empty(l:formula) ? '' : ('  ' . l:formula)
+    return l:sheet . ' / ' . l:cell_part . l:formula_part
 endfunction
 " ----------------------------------------------------------------------------
 " ExcelGoto(ref): nhảy con trỏ đến ô có địa chỉ Excel `ref` (vd "B3"). Tra
@@ -630,17 +692,10 @@ function! ExcelOpen()
         return
     endif
     " Gọi binary excel với lệnh 'open' để chuyển .xlsx -> text dạng bảng
-    let l:output = s:ExcelCmd(
-            \ 'open',
-            \ b:xlsx_sheet
-            \ )
-    " Nếu binary lỗi (exit code != 0) thì báo lỗi và dừng
-    if v:shell_error
-        echoerr join(l:output, "\n")
+    if !s:ExcelReloadBuffer(b:xlsx_sheet)
         unlet! b:xlsx_buffer
         return
     endif
-    call s:ExcelLoadIntoBuffer(l:output)
     " Thiết lập các option cho buffer:
     " - buftype=acwrite: buffer không gắn trực tiếp với file thật,
     "   việc ghi (write) sẽ được xử lý thủ công qua autocmd BufWriteCmd
@@ -695,15 +750,9 @@ function! ExcelSave()
     endif
     " Sau khi lưu thành công, đọc lại file .xlsx để cập nhật buffer
     " với nội dung đã được excel format/chuẩn hoá lại (căn cột, v.v.)
-    let l:output = s:ExcelCmd(
-            \ 'open',
-            \ b:xlsx_sheet
-            \ )
-    if v:shell_error
-        echoerr join(l:output, "\n")
+    if !s:ExcelReloadBuffer(b:xlsx_sheet)
         return
     endif
-    call s:ExcelLoadIntoBuffer(l:output)
     " Đánh dấu lại buffer là "đã lưu, không còn thay đổi"
     set nomodified
     echo 'Excel saved & reformatted'
@@ -725,15 +774,9 @@ function! ExcelSheetOpen(sheet)
         set nomodified
     endif
     let b:xlsx_sheet = a:sheet
-    let l:output = s:ExcelCmd(
-                \ 'open',
-                \ a:sheet
-                \ )
-    if v:shell_error
-        echoerr join(l:output, "\n")
+    if !s:ExcelReloadBuffer(a:sheet)
         return
     endif
-    call s:ExcelLoadIntoBuffer(l:output)
     set nomodified
 endfunction
 " ----------------------------------------------------------------------------
@@ -842,12 +885,9 @@ function! s:ExcelRunStyleCmd(mode, cell_refs, extra_arg) abort
         echoerr join(l:result, "\n")
         return 0
     endif
-    let l:output = s:ExcelCmd('open', b:xlsx_sheet)
-    if v:shell_error
-        echoerr join(l:output, "\n")
+    if !s:ExcelReloadBuffer(b:xlsx_sheet)
         return 0
     endif
-    call s:ExcelLoadIntoBuffer(l:output)
     set nomodified
     return 1
 endfunction
@@ -987,12 +1027,9 @@ function! ExcelMerge(line1, line2) abort
         echoerr join(l:result, "\n")
         return
     endif
-    let l:output = s:ExcelCmd('open', b:xlsx_sheet)
-    if v:shell_error
-        echoerr join(l:output, "\n")
+    if !s:ExcelReloadBuffer(b:xlsx_sheet)
         return
     endif
-    call s:ExcelLoadIntoBuffer(l:output)
     set nomodified
     echo 'Merged range: ' . l:bbox
 endfunction
@@ -1014,14 +1051,71 @@ function! ExcelUnmerge(line1, line2) abort
         echoerr join(l:result, "\n")
         return
     endif
-    let l:output = s:ExcelCmd('open', b:xlsx_sheet)
-    if v:shell_error
-        echoerr join(l:output, "\n")
+    if !s:ExcelReloadBuffer(b:xlsx_sheet)
         return
     endif
-    call s:ExcelLoadIntoBuffer(l:output)
     set nomodified
     echo 'Unmerged: ' . l:input
+endfunction
+" ----------------------------------------------------------------------------
+" ExcelShowFormula(): bật/tắt mode hiển thị CÔNG THỨC ("=SUM(A1:A4)") ngay
+" trong bảng thay vì giá trị đã tính — giống Ctrl+` trong Excel. Gọi lại
+" lần 2 để quay về hiển thị giá trị bình thường. b:xlsx_show_formulas
+" được lưu trên buffer nên giữ nguyên trạng thái qua mọi lần :w / đổi màu
+" / merge... (mọi điểm reload đều đi qua s:ExcelReloadBuffer, tự đọc lại
+" flag này mỗi lần).
+"
+" Khi mode đang BẬT, các cell có công thức hiển thị nguyên văn "=...".
+" Sửa trực tiếp 1 trong các cell đó rồi :w hoạt động bình thường — vì nội
+" dung hiển thị vẫn bắt đầu bằng "=", save_logic nhận diện y như khi gõ
+" formula mới, không cần xử lý gì khác ở phía Rust.
+" ----------------------------------------------------------------------------
+function! ExcelShowFormula() abort
+    if !exists('b:xlsx_file')
+        echoerr 'This buffer is not an Excel file'
+        return
+    endif
+    let b:xlsx_show_formulas = !get(b:, 'xlsx_show_formulas', 0)
+    if !s:ExcelReloadBuffer(b:xlsx_sheet)
+        " Lỗi -> rollback flag để lần gọi sau không bị kẹt ở trạng thái sai
+        let b:xlsx_show_formulas = !b:xlsx_show_formulas
+        return
+    endif
+    set nomodified
+    echo b:xlsx_show_formulas ? 'Showing formulas' : 'Showing values'
+endfunction
+" ----------------------------------------------------------------------------
+" ExcelApplyFormula(line1, line2): "Apply Formula" — tương đương kéo fill
+" handle trong Excel. BẮT BUỘC gọi từ Visual mode (v/V/Ctrl-V), chọn 1
+" vùng mà Ô ĐẦU TIÊN (trên cùng / bên trái nhất trong vùng) đang có công
+" thức — ví dụ đang đứng ở B2 = "=B1+1", Visual chọn B2:B10 rồi gọi lệnh
+" này: B3 sẽ tự thành "=B2+1", B4 thành "=B3+1", ... (mỗi ô dịch tham
+" chiếu theo đúng độ lệch (dòng, cột) so với B2). Visual chọn ngang 1 dòng
+" thì dịch theo cột tương tự. Visual chọn cả khối 2D cũng hoạt động vì độ
+" lệch được tính riêng cho từng ô đích.
+"
+" Báo lỗi nếu: không ở Visual mode (chỉ có 1 ô), hoặc ô đầu tiên trong
+" vùng chọn không có công thức sẵn.
+" ----------------------------------------------------------------------------
+function! ExcelApplyFormula(line1, line2) abort
+    let l:refs = s:ExcelResolveTargetCells(a:line1, a:line2)
+    if empty(l:refs)
+        return
+    endif
+    if len(l:refs) < 2
+        echoerr 'Cần Visual chọn ít nhất 2 ô: ô đầu (có công thức mẫu) + các ô áp dụng theo'
+        return
+    endif
+    let l:result = s:ExcelCmd('applyformula', join(l:refs, ','), b:xlsx_sheet)
+    if v:shell_error
+        echoerr join(l:result, "\n")
+        return
+    endif
+    if !s:ExcelReloadBuffer(b:xlsx_sheet)
+        return
+    endif
+    set nomodified
+    echo 'Applied formula from ' . l:refs[0] . ' to ' . (len(l:refs) - 1) . ' cell(s)'
 endfunction
 " ----------------------------------------------------------------------------
 " ExcelColorComplete(): gợi ý tên màu chuẩn khi user gõ Tab ở tham số màu
@@ -1079,4 +1173,6 @@ command! -range ExcelBold call ExcelBold(<line1>, <line2>)
 command! -range ExcelItalic call ExcelItalic(<line1>, <line2>)
 command! -range ExcelMerge call ExcelMerge(<line1>, <line2>)
 command! -range ExcelUnmerge call ExcelUnmerge(<line1>, <line2>)
+command! ExcelShowFormula call ExcelShowFormula()
+command! -range ExcelApplyFormula call ExcelApplyFormula(<line1>, <line2>)
 command! -nargs=1 -complete=customlist,ExcelGotoComplete ExcelGoto call ExcelGoto(<q-args>)

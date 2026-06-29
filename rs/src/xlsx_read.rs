@@ -331,6 +331,14 @@ pub fn parse_sheet_xml(xml: &[u8], shared_strings: &[String], styles: &[CellStyl
     let mut in_v = false;
     let mut in_is_t = false; // trong <is><t>...</t></is> (inline string)
     let mut in_c = false;
+    // Trạng thái đọc thẻ <f> (formula) bên trong <c>. Chỉ những cell có
+    // <f> KHÔNG phải shared/array (t="normal" hoặc không có attribute t)
+    // mới được lưu vào sheet.formulas — xem cmd_open trong main.rs để biết
+    // lý do (shared formula tham chiếu tới 1 master formula ở chỗ khác,
+    // chưa hỗ trợ dịch offset cell reference ở đây).
+    let mut cur_formula = String::new();
+    let mut cur_formula_type: Option<String> = None;
+    let mut in_f = false;
 
     loop {
         match reader.read_event_into(&mut buf)? {
@@ -351,6 +359,8 @@ pub fn parse_sheet_xml(xml: &[u8], shared_strings: &[String], styles: &[CellStyl
                 cur_type = get_attr(&e, "t")?;
                 cur_style_id = get_attr(&e, "s")?.and_then(|s| s.parse().ok());
                 cur_value.clear();
+                cur_formula.clear();
+                cur_formula_type = None;
             }
             Event::Empty(e) if e.local_name().as_ref() == b"c" => {
                 // <c r="A1"/> hoàn toàn rỗng (tự đóng, không có <v> con).
@@ -381,6 +391,15 @@ pub fn parse_sheet_xml(xml: &[u8], shared_strings: &[String], styles: &[CellStyl
                             sheet.cell_style_id.insert((row, col), sid);
                         }
                     }
+                    // Chỉ lưu formula "normal" (không có attribute t, hoặc
+                    // t="normal") — shared/array formula bị bỏ qua vì cần
+                    // dịch offset cell reference, chưa hỗ trợ (xem comment
+                    // ở khai báo cur_formula_type phía trên).
+                    if !cur_formula.is_empty()
+                        && cur_formula_type.as_deref().unwrap_or("normal") == "normal"
+                    {
+                        sheet.formulas.insert((row, col), cur_formula.clone());
+                    }
                     let resolved = resolve_value(&cur_type, &cur_value, shared_strings);
                     if !resolved.is_empty() {
                         sheet.set(row, col, resolved);
@@ -397,12 +416,29 @@ pub fn parse_sheet_xml(xml: &[u8], shared_strings: &[String], styles: &[CellStyl
                 cur_type = None;
                 cur_style_id = None;
                 cur_value.clear();
+                cur_formula.clear();
+                cur_formula_type = None;
             }
             Event::Start(e) if in_c && e.local_name().as_ref() == b"v" => {
                 in_v = true;
             }
             Event::End(e) if e.local_name().as_ref() == b"v" => {
                 in_v = false;
+            }
+            Event::Start(e) if in_c && e.local_name().as_ref() == b"f" => {
+                in_f = true;
+                cur_formula.clear();
+                cur_formula_type = get_attr(&e, "t")?; // None = "normal"
+            }
+            Event::Empty(e) if in_c && e.local_name().as_ref() == b"f" => {
+                // <f t="shared" si="3"/>: ô KHÔNG phải master của shared
+                // formula group, không có text -> bỏ qua. Giá trị cache
+                // <v> vẫn được đọc bình thường nên cell vẫn hiển thị đúng,
+                // chỉ không hover/tính lại được (xem README phần Giới hạn).
+                let _ = e;
+            }
+            Event::End(e) if e.local_name().as_ref() == b"f" => {
+                in_f = false;
             }
             Event::Start(e) if in_c && e.local_name().as_ref() == b"is" => {
                 // inline string container <is><t>...</t></is>
@@ -416,6 +452,9 @@ pub fn parse_sheet_xml(xml: &[u8], shared_strings: &[String], styles: &[CellStyl
             }
             Event::Text(t) if in_v || in_is_t => {
                 cur_value.push_str(&t.unescape()?);
+            }
+            Event::Text(t) if in_f => {
+                cur_formula.push_str(&t.unescape()?);
             }
             Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"mergeCell" => {
                 if let Some(range) = get_attr(&e, "ref")? {
